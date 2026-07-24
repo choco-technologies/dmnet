@@ -11,6 +11,9 @@ if(DEFINED DMOD_DIR AND NOT "${DMOD_DIR}" STREQUAL "")
     set(FETCHCONTENT_SOURCE_DIR_DMOD "${DMOD_DIR}" CACHE PATH "" FORCE)
 endif()
 
+# ======================================================================
+#   DMOD including
+# ======================================================================
 include(FetchContent)
 FetchContent_Declare(
     dmod
@@ -34,6 +37,13 @@ set(DMOD_DIR ${dmod_SOURCE_DIR} CACHE PATH "DMOD source directory")
 set(DMOD_SCRIPTS_DIR ${DMOD_DIR}/scripts CACHE PATH "DMOD scripts directory")
 include(${DMOD_DIR}/paths.cmake)
 dmod_setup_external_module()
+
+# ======================================================================
+#   Subdirectories
+# ======================================================================
+add_subdirectory(lib)
+add_subdirectory(services)
+add_subdirectory(tools)
 
 # Name of the module
 set(DMOD_MODULE_NAME        dmnet)
