@@ -59,6 +59,45 @@ typedef struct
 #define DMNETIF_NAME_MAX_LEN 15
 
 /**
+ * @brief Length in bytes of an IPv4 address
+ */
+#define DMNETIF_IPV4_ADDR_LEN 4
+
+/**
+ * @brief Length in bytes of an IPv6 address
+ */
+#define DMNETIF_IPV6_ADDR_LEN 16
+
+/**
+ * @brief IP address family - which member of dmnetif_ip_addr_t's addr union
+ *        is valid
+ */
+typedef enum
+{
+    dmnetif_ip_family_none = 0,    /**< No IP address assigned */
+    dmnetif_ip_family_v4   = 4,    /**< addr.v4 is valid */
+    dmnetif_ip_family_v6   = 6,    /**< addr.v6 is valid */
+} dmnetif_ip_family_t;
+
+/**
+ * @brief A single IP address, either IPv4 or IPv6
+ *
+ * One type covering both families (discriminated by `family`) rather than
+ * separate dmnetif_ipv4_addr_t/dmnetif_ipv6_addr_t types and a parallel
+ * _v4/_v6 function pair for every IP-address operation - callers branch on
+ * `family` once, not per function.
+ */
+typedef struct
+{
+    dmnetif_ip_family_t family;
+    union
+    {
+        uint8_t v4[DMNETIF_IPV4_ADDR_LEN];
+        uint8_t v6[DMNETIF_IPV6_ADDR_LEN];
+    } addr;
+} dmnetif_ip_addr_t;
+
+/**
  * @brief Link status of a network interface
  */
 typedef enum
@@ -228,6 +267,40 @@ dmod_dmnetif_api(1.0, int, _get_mac_address, ( dmnetif_iface_t iface, dmnetif_ma
  * @return 0 on success, negative errno on failure
  */
 dmod_dmnetif_api(1.0, int, _set_mac_address, ( dmnetif_iface_t iface, const dmnetif_mac_addr_t* mac ));
+
+/* ============================================================================
+ *                      IP address
+ * ========================================================================== */
+
+/**
+ * @brief Get an interface's currently assigned IP address
+ *
+ * @param iface Interface handle
+ * @param ip    Output buffer. On success, ip->family is dmnetif_ip_family_none
+ *              if no IP address has been assigned yet
+ *
+ * @return 0 on success, negative errno on failure (invalid iface or NULL ip)
+ */
+dmod_dmnetif_api(1.0, int, _get_ip_address, ( dmnetif_iface_t iface, dmnetif_ip_addr_t* ip ));
+
+/**
+ * @brief Set an interface's IP address
+ *
+ * Purely local bookkeeping, unlike dmnetif_set_mac_address() - there is no
+ * dmdrvi ioctl for this. An IP address is a network-layer concept the
+ * driver/hardware below dmnetif has no notion of; it's assigned by whatever
+ * runs above dmnetif (e.g. a DHCP client or static config in networkd) and
+ * simply stored here for lookup by name, same as everything else dmnetif
+ * tracks per interface.
+ *
+ * @param iface Interface handle
+ * @param ip    IP address to assign (family must be dmnetif_ip_family_v4 or
+ *              _v6; pass dmnetif_ip_family_none to clear the assigned address)
+ *
+ * @return 0 on success, negative errno on failure (invalid iface, NULL ip,
+ *         or an unrecognized family)
+ */
+dmod_dmnetif_api(1.0, int, _set_ip_address, ( dmnetif_iface_t iface, const dmnetif_ip_addr_t* ip ));
 
 /* ============================================================================
  *                      Frame I/O (bridge to the network stack)

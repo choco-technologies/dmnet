@@ -15,7 +15,7 @@ without ever knowing devfs paths or dmdrvi ioctl commands exist.
 ├──────────────────────────────────────────────┤
 │                  DMNETIF                      │
 │   register/unregister, up/down, link status,  │
-│   MAC address, send/receive one frame,        │
+│   MAC/IP address, send/receive one frame,     │
 │   name <-> handle lookup                      │
 ├──────────────────────────────────────────────┤
 │         DMDRVI (open/read/write/ioctl)        │
@@ -44,6 +44,21 @@ dmod_dmdrvi_dif_api_declaration(1.0, dmeth, void, _path_ready,
 `dmnetif_register()` opens `path` itself (the same `Dmod_FileOpen`/`Ioctl`
 SAL any application would use) and keeps it open for the interface's
 lifetime - the driver never opens its own device file.
+
+## IP address
+
+Unlike the MAC address, an interface's IP address is never pushed down to
+the driver via a `dmdrvi` ioctl - it's a network-layer concept the
+driver/hardware has no notion of at all. `dmnetif_get_ip_address()`/
+`_set_ip_address()` are purely local bookkeeping: whatever assigns
+addresses above DMNETIF (a DHCP client or static config in `networkd`)
+calls `dmnetif_set_ip_address()`, and anything else that needs to know an
+interface's address (e.g. `ifconfig`) reads it back with
+`dmnetif_get_ip_address()`.
+
+`dmnetif_ip_addr_t` is one type for both IPv4 and IPv6 (a `family` tag plus
+a `v4[4]`/`v6[16]` union) rather than separate types and function pairs per
+family - callers branch on `family` once, not per function.
 
 ## Frame I/O
 

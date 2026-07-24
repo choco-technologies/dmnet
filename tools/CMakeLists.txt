@@ -1,4 +1,5 @@
 # Application-type DMOD modules that live under dmnet/tools/.
 #
-# Nothing here yet - netctl/ and ifconfig/ have no module scaffold yet.
-# Add `add_subdirectory(netctl)` / `add_subdirectory(ifconfig)` once they do.
+# netctl/ has no module scaffold yet - add `add_subdirectory(netctl)` once
+# it does.
+add_subdirectory(ifconfig)

@@ -23,38 +23,105 @@
 #include <string.h>
 #include <errno.h>
 
-/* Magic set to "NTIF" */
+/**
+ * @brief Magic value guarding struct dmnetif_iface against stale/invalid
+ *        pointers - set to "NTIF" packed into a uint32_t
+ */
 #define DMNETIF_CONTEXT_MAGIC    0x4E544946u
 
+/**
+ * @brief Private definition of the opaque dmnetif_iface_t handle
+ *
+ * One instance per interface registered via dmnetif_register(), held in
+ * g_ifaces for the interface's lifetime.
+ */
 struct dmnetif_iface
 {
-    uint32_t magic;
-    char     name[DMNETIF_NAME_MAX_LEN + 1];
-    char*    device_path;
-    void*    file;
-    bool     up;
+    uint32_t           magic;                          /**< Must equal DMNETIF_CONTEXT_MAGIC for this struct to be considered valid - see is_valid_iface() */
+    char               name[DMNETIF_NAME_MAX_LEN + 1];  /**< Interface name, as passed to dmnetif_register() (null-terminated) */
+    char*              device_path;                    /**< Dmod_StrDup()'d copy of the devfs path passed to dmnetif_register() */
+    void*              file;                            /**< Handle returned by Dmod_FileOpen(device_path, "r+"), kept open for the interface's lifetime */
+    bool               up;                               /**< Whether dmnetif_up() has been applied without a matching dmnetif_down() since */
+    dmnetif_ip_addr_t  ip;                                /**< Currently assigned IP address; family is dmnetif_ip_family_none until dmnetif_set_ip_address() is called */
 };
 
+/**
+ * @brief Registry of every currently registered interface (struct dmnetif_iface*)
+ *
+ * Created in dmod_init(), destroyed in dmod_deinit(). Guarded by g_mutex.
+ */
 static dmlist_context_t* g_ifaces = NULL;
-static dmosi_mutex_t     g_mutex  = NULL;
 
+/**
+ * @brief Mutex guarding g_ifaces against concurrent register/unregister/
+ *        lookup calls
+ *
+ * Created in dmod_init(), destroyed in dmod_deinit().
+ */
+static dmosi_mutex_t g_mutex = NULL;
+
+/**
+ * @brief Check whether a handle is a live, correctly-typed dmnetif_iface_t
+ *
+ * Called at the top of every function that dereferences an interface
+ * handle, before it is used, to catch a stale/freed or wrong-type pointer
+ * early instead of leading to undefined behavior further down.
+ *
+ * @param iface Handle to validate (NULL is a valid input - returns false)
+ *
+ * @return true if iface is non-NULL and its magic field is intact
+ */
 static bool is_valid_iface(dmnetif_iface_t iface)
 {
     return iface != NULL && iface->magic == DMNETIF_CONTEXT_MAGIC;
 }
 
-/* dmlist_find()/_remove() call compare_func(list_element, data) - see dmlist.c */
+/**
+ * @brief dmlist_compare_func_t comparing a struct dmnetif_iface's name
+ *        against a plain "const char*" needle
+ *
+ * dmlist_find()/_remove() call compare_func(list_element, data) - see
+ * dmlist.c - so `data` here is the list element (a struct dmnetif_iface*)
+ * and `user_data` is the name string passed to dmnetif_find_by_name()/
+ * the duplicate-name check in dmnetif_register().
+ *
+ * @param data      One interface currently in the registry (struct dmnetif_iface*)
+ * @param user_data Name to compare against (const char*)
+ *
+ * @return 0 if the interface's name matches user_data, matching strcmp() otherwise
+ */
 static int compare_name(const void* data, const void* user_data)
 {
     const struct dmnetif_iface* iface = (const struct dmnetif_iface*)data;
     return strcmp(iface->name, (const char*)user_data);
 }
 
+/**
+ * @brief dmlist_compare_func_t comparing two elements by pointer identity
+ *
+ * Used by dmnetif_unregister() to remove a specific interface from the
+ * registry by its own address, regardless of its contents.
+ *
+ * @param data      One interface currently in the registry
+ * @param user_data The interface pointer being searched for
+ *
+ * @return 0 if data and user_data are the same pointer, -1 otherwise
+ */
 static int compare_pointer(const void* data, const void* user_data)
 {
     return (data == user_data) ? 0 : -1;
 }
 
+/**
+ * @brief Tear down one interface: stop it if running, close its device
+ *        file, and free it
+ *
+ * Does not touch the registry - callers are responsible for having already
+ * removed iface from g_ifaces before calling this (see dmnetif_unregister()
+ * and dmod_deinit()).
+ *
+ * @param iface Interface to tear down (must be a valid, non-NULL handle)
+ */
 static void close_iface(struct dmnetif_iface* iface)
 {
     if (iface->up)
@@ -69,6 +136,14 @@ static void close_iface(struct dmnetif_iface* iface)
 
 /* ---- DMOD lifecycle ---- */
 
+/**
+ * @brief Module initialization - allocates the interface registry and its
+ *        guarding mutex
+ *
+ * @param Config Module configuration (unused)
+ *
+ * @return 0 on success, -1 if the registry or mutex could not be allocated
+ */
 int dmod_init(const Dmod_Config_t *Config)
 {
     g_ifaces = dmlist_create(Dmod_GetCurrentAllocatorName());
@@ -83,6 +158,12 @@ int dmod_init(const Dmod_Config_t *Config)
     return 0;
 }
 
+/**
+ * @brief Module deinitialization - tears down every still-registered
+ *        interface, then frees the registry and its mutex
+ *
+ * @return Always 0
+ */
 int dmod_deinit(void)
 {
     size_t count = dmlist_size(g_ifaces);
@@ -102,6 +183,9 @@ int dmod_deinit(void)
 
 /* ---- Registration (driver-facing) ---- */
 
+/**
+ * @brief Implementation of dmnetif_register() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, dmnetif_iface_t, _register, ( const char* name, const char* device_path ))
 {
     if (name == NULL || device_path == NULL)
@@ -157,6 +241,9 @@ dmod_dmnetif_api_declaration(1.0, dmnetif_iface_t, _register, ( const char* name
     return iface;
 }
 
+/**
+ * @brief Implementation of dmnetif_unregister() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, void, _unregister, ( dmnetif_iface_t iface ))
 {
     if (!is_valid_iface(iface))
@@ -171,6 +258,9 @@ dmod_dmnetif_api_declaration(1.0, void, _unregister, ( dmnetif_iface_t iface ))
 
 /* ---- Lookup / enumeration ---- */
 
+/**
+ * @brief Implementation of dmnetif_find_by_name() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, dmnetif_iface_t, _find_by_name, ( const char* name ))
 {
     if (name == NULL)
@@ -182,6 +272,9 @@ dmod_dmnetif_api_declaration(1.0, dmnetif_iface_t, _find_by_name, ( const char* 
     return (dmnetif_iface_t)found;
 }
 
+/**
+ * @brief Implementation of dmnetif_count() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, size_t, _count, ( void ))
 {
     dmosi_mutex_lock(g_mutex);
@@ -190,18 +283,35 @@ dmod_dmnetif_api_declaration(1.0, size_t, _count, ( void ))
     return count;
 }
 
+/**
+ * @brief Closure passed as dmlist_foreach()'s user_data by dmnetif_for_each(),
+ *        letting for_each_trampoline() recover the caller's own callback/
+ *        user_data pair
+ */
 typedef struct
 {
-    dmnetif_iterator_func_t callback;
-    void*                   user_data;
+    dmnetif_iterator_func_t callback;    /**< Caller-supplied callback to invoke per interface */
+    void*                   user_data;   /**< Caller-supplied opaque data, passed through to callback unchanged */
 } for_each_ctx_t;
 
+/**
+ * @brief dmlist_iterator_func_t adapting dmlist's "void* data" element type
+ *        to dmnetif_for_each()'s "dmnetif_iface_t iface" callback signature
+ *
+ * @param data      One interface currently in the registry (struct dmnetif_iface*)
+ * @param user_data A for_each_ctx_t* (see dmnetif_for_each())
+ *
+ * @return Whatever the caller's own callback returns (true to continue, false to stop)
+ */
 static bool for_each_trampoline(void* data, void* user_data)
 {
     for_each_ctx_t* ctx = (for_each_ctx_t*)user_data;
     return ctx->callback((dmnetif_iface_t)data, ctx->user_data);
 }
 
+/**
+ * @brief Implementation of dmnetif_for_each() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, void, _for_each, ( dmnetif_iterator_func_t callback, void* user_data ))
 {
     if (callback == NULL)
@@ -213,6 +323,9 @@ dmod_dmnetif_api_declaration(1.0, void, _for_each, ( dmnetif_iterator_func_t cal
     dmosi_mutex_unlock(g_mutex);
 }
 
+/**
+ * @brief Implementation of dmnetif_get_name() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, const char*, _get_name, ( dmnetif_iface_t iface ))
 {
     return is_valid_iface(iface) ? iface->name : NULL;
@@ -220,6 +333,9 @@ dmod_dmnetif_api_declaration(1.0, const char*, _get_name, ( dmnetif_iface_t ifac
 
 /* ---- State control ---- */
 
+/**
+ * @brief Implementation of dmnetif_up() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, int, _up, ( dmnetif_iface_t iface ))
 {
     if (!is_valid_iface(iface))
@@ -231,6 +347,9 @@ dmod_dmnetif_api_declaration(1.0, int, _up, ( dmnetif_iface_t iface ))
     return ret;
 }
 
+/**
+ * @brief Implementation of dmnetif_down() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, int, _down, ( dmnetif_iface_t iface ))
 {
     if (!is_valid_iface(iface))
@@ -241,11 +360,17 @@ dmod_dmnetif_api_declaration(1.0, int, _down, ( dmnetif_iface_t iface ))
     return ret;
 }
 
+/**
+ * @brief Implementation of dmnetif_is_up() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, bool, _is_up, ( dmnetif_iface_t iface ))
 {
     return is_valid_iface(iface) && iface->up;
 }
 
+/**
+ * @brief Implementation of dmnetif_get_link_status() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, dmnetif_link_status_t, _get_link_status, ( dmnetif_iface_t iface ))
 {
     if (!is_valid_iface(iface))
@@ -260,6 +385,9 @@ dmod_dmnetif_api_declaration(1.0, dmnetif_link_status_t, _get_link_status, ( dmn
 
 /* ---- MAC address ---- */
 
+/**
+ * @brief Implementation of dmnetif_get_mac_address() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, int, _get_mac_address, ( dmnetif_iface_t iface, dmnetif_mac_addr_t* mac ))
 {
     if (!is_valid_iface(iface) || mac == NULL)
@@ -274,6 +402,9 @@ dmod_dmnetif_api_declaration(1.0, int, _get_mac_address, ( dmnetif_iface_t iface
     return ret;
 }
 
+/**
+ * @brief Implementation of dmnetif_set_mac_address() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, int, _set_mac_address, ( dmnetif_iface_t iface, const dmnetif_mac_addr_t* mac ))
 {
     if (!is_valid_iface(iface) || mac == NULL)
@@ -284,8 +415,45 @@ dmod_dmnetif_api_declaration(1.0, int, _set_mac_address, ( dmnetif_iface_t iface
     return Dmod_Ioctl(iface->file, DMDRVI_IOCTL_NET_SET_MAC_ADDR, &addr);
 }
 
+/* ---- IP address ---- */
+
+/**
+ * @brief Implementation of dmnetif_get_ip_address() - see dmnetif.h
+ */
+dmod_dmnetif_api_declaration(1.0, int, _get_ip_address, ( dmnetif_iface_t iface, dmnetif_ip_addr_t* ip ))
+{
+    if (!is_valid_iface(iface) || ip == NULL)
+        return -EINVAL;
+
+    *ip = iface->ip;
+    return 0;
+}
+
+/**
+ * @brief Implementation of dmnetif_set_ip_address() - see dmnetif.h
+ */
+dmod_dmnetif_api_declaration(1.0, int, _set_ip_address, ( dmnetif_iface_t iface, const dmnetif_ip_addr_t* ip ))
+{
+    if (!is_valid_iface(iface) || ip == NULL)
+        return -EINVAL;
+
+    if (ip->family != dmnetif_ip_family_none &&
+        ip->family != dmnetif_ip_family_v4 &&
+        ip->family != dmnetif_ip_family_v6)
+    {
+        DMOD_LOG_ERROR("dmnetif_set_ip_address: unrecognized IP family %d\n", (int)ip->family);
+        return -EINVAL;
+    }
+
+    iface->ip = *ip;
+    return 0;
+}
+
 /* ---- Frame I/O ---- */
 
+/**
+ * @brief Implementation of dmnetif_send() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, size_t, _send, ( dmnetif_iface_t iface, const void* frame, size_t length ))
 {
     if (!is_valid_iface(iface) || frame == NULL || length == 0 || !iface->up)
@@ -294,6 +462,9 @@ dmod_dmnetif_api_declaration(1.0, size_t, _send, ( dmnetif_iface_t iface, const 
     return Dmod_FileWrite(frame, 1, length, iface->file);
 }
 
+/**
+ * @brief Implementation of dmnetif_receive() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, size_t, _receive, ( dmnetif_iface_t iface, void* buffer, size_t size ))
 {
     if (!is_valid_iface(iface) || buffer == NULL || size == 0 || !iface->up)
@@ -304,6 +475,9 @@ dmod_dmnetif_api_declaration(1.0, size_t, _receive, ( dmnetif_iface_t iface, voi
 
 /* ---- Escape hatch ---- */
 
+/**
+ * @brief Implementation of dmnetif_ioctl() - see dmnetif.h
+ */
 dmod_dmnetif_api_declaration(1.0, int, _ioctl, ( dmnetif_iface_t iface, int command, void* arg ))
 {
     if (!is_valid_iface(iface))

@@ -15,6 +15,8 @@ API's shape.
 |----------------------------|---------------------------------------------------------------------|
 | `dmnetif_iface_t`          | Opaque handle to one registered network interface                  |
 | `dmnetif_mac_addr_t`       | `{ uint8_t addr[DMNETIF_MAC_ADDR_LEN] }` - MAC address              |
+| `dmnetif_ip_family_t`      | `dmnetif_ip_family_none` \| `_v4` \| `_v6`                          |
+| `dmnetif_ip_addr_t`        | `{ family; union { v4[4]; v6[16]; } addr; }` - one type for both IPv4 and IPv6, discriminated by `family` |
 | `dmnetif_link_status_t`    | `dmnetif_link_down` \| `dmnetif_link_up`                            |
 | `dmnetif_iterator_func_t`  | `bool (*)(dmnetif_iface_t iface, void* user_data)` - see `dmnetif_for_each()` |
 
@@ -49,6 +51,13 @@ API's shape.
 |------------------------------------------------------|-------------------------------|
 | `dmnetif_get_mac_address(iface, mac)`                | Read the interface's MAC address. |
 | `dmnetif_set_mac_address(iface, mac)`                | Set the interface's MAC address.  |
+
+## IP address
+
+| Function                                          | Description               |
+|------------------------------------------------------|-------------------------------|
+| `dmnetif_get_ip_address(iface, ip)`                  | Read the interface's currently assigned IP address (`family` is `dmnetif_ip_family_none` if none assigned). |
+| `dmnetif_set_ip_address(iface, ip)`                  | Assign (or, with `dmnetif_ip_family_none`, clear) the interface's IP address. Local bookkeeping only - no dmdrvi ioctl, since IP addresses are a network-layer concept the driver has no notion of. |
 
 ## Frame I/O
 
