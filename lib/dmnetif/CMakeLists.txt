@@ -27,12 +27,21 @@ dmod_add_library(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/dmnetif.c
 )
 
-target_include_directories(${DMOD_MODULE_NAME} PRIVATE
+target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+# dmlist: backs the interface registry
+# dmdrvi: DMDRVI_IOCTL_NET_* commands/types used to talk to a registered
+#         interface's underlying device file
+# dmini:  dmdrvi.h includes dmini.h (dmini_context_t appears in dmdrvi_create's
+#         signature) - needed transitively even though dmnetif never calls it
+# dmosi:  mutex guarding the registry
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmlist
+    dmdrvi
+    dmini
+    dmosi
 )
 
 add_subdirectory(tests)

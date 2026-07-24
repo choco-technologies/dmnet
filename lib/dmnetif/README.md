@@ -9,9 +9,6 @@ assigned as a named interface (`"eth0"`); everything above that line (a
 TCP/IP stack, `netctl`/`ifconfig`) only ever talks to dmnetif by interface
 name.
 
-> **Status:** API-only stub - see `src/dmnetif.c` and
-> [docs/api-reference.md](docs/api-reference.md).
-
 ## Building
 
 This module lives under `lib/dmnetif` inside the `dmnet` repository and is

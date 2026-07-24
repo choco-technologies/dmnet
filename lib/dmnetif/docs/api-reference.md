@@ -1,11 +1,13 @@
 # dmnetif API Reference
 
-> **Status:** stub. Every function below compiles and returns a safe
-> placeholder (`NULL`/`false`/`0`/`-ENOSYS`) - see `src/dmnetif.c`. This
-> reference documents the intended contract, not yet the real behavior.
-
 See [dmnetif.md](dmnetif.md) for the architecture and rationale behind this
 API's shape.
+
+> **Note:** no real network driver registers with dmnetif yet - `dmeth`
+> doesn't call `dmnetif_register()` from its `dmdrvi_path_ready()` yet (see
+> [dmnetif.md](dmnetif.md#registration-flow)). The registry itself
+> (register/unregister/find/count/for_each) is fully implemented and tested
+> against `/dev/null` as a stand-in device file - see `tests/dmnetif_test.c`.
 
 ## Types
 

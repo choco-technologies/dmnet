@@ -140,9 +140,14 @@ typedef bool (*dmnetif_iterator_func_t)( dmnetif_iface_t iface, void* user_data 
  * For listing every interface (e.g. "ifconfig -a") without the instability
  * of an index-based lookup across intervening register/unregister calls -
  * mirrors dmlist_foreach(), which dmnetif uses internally to hold its
- * registry. Visits interfaces in registration order; safe to call
- * dmnetif_unregister() on the current interface from within callback, but
- * not on any other interface (may invalidate iteration state).
+ * registry. Visits interfaces in registration order.
+ *
+ * The registry is locked for the duration of the traversal: do not call
+ * dmnetif_register()/dmnetif_unregister() (on any interface, including the
+ * one currently being visited) from within callback - the underlying
+ * dmlist_foreach() advances to the next node after the callback returns,
+ * so removing the node currently being visited would leave it dangling,
+ * and re-locking the registry's mutex from the same thread would deadlock.
  *
  * @param callback  Called once per interface until it returns false or
  *                  every interface has been visited
