@@ -22,9 +22,14 @@ Example output:
 ```
 $ ifconfig
 eth0       Link encap:Ethernet  HWaddr 02:00:00:00:00:01
+          inet addr:192.168.1.42
           UP  LINK-UP
 
 ```
+
+The `inet`/`inet6` line is only printed once an IP address has actually
+been assigned to the interface (via `dmnetif_set_ip_address()` - there is
+no `ifconfig <iface> inet <addr>`-style command yet, only display).
 
 ## Building
 
@@ -53,10 +58,22 @@ Application-type module can't be loaded as another module's dependency
 entirely by loading/running/unloading it on demand instead of holding it
 resident for the test's lifetime.
 
+## Documentation
+
+See the `docs/` directory:
+
+- **[ifconfig.md](docs/ifconfig.md)** - Usage, exit codes, and how this
+  module is tested
+
+View documentation using `dmf-man ifconfig`.
+
 ## Project Structure
 
 ```
 ifconfig/
+├── docs/
+│   ├── README.md
+│   └── ifconfig.md
 ├── src/
 │   └── ifconfig.c
 ├── tests/

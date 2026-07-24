@@ -29,6 +29,15 @@ static dmnetif_iface_t g_iface = NULL;
 void dmod_test_setup(void)
 {
     g_iface = dmnetif_register("test0", TEST_DEVICE_PATH);
+
+    /* So "show"/"list" steps below exercise the inet-address print path too. */
+    dmnetif_ip_addr_t ip = { 0 };
+    ip.family = dmnetif_ip_family_v4;
+    ip.addr.v4[0] = 192;
+    ip.addr.v4[1] = 168;
+    ip.addr.v4[2] = 1;
+    ip.addr.v4[3] = 42;
+    dmnetif_set_ip_address(g_iface, &ip);
 }
 
 void dmod_test_teardown(void)

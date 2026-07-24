@@ -20,6 +20,9 @@ dmd=./${module}.dmd => ${destination}/${module}.dmd [origin=${dmf_dir}/${module}
 version=./${module}_version.txt => ${destination}/${module}_version.txt [origin=${dmf_dir}/${module}_version.txt]
 
 # === Documentation ===
+# Module documentation in markdown format for dmf-man tool
+docs=./docs => ${destination}/${module}/docs [origin=${repo_dir}/tools/ifconfig/docs]
+
 # README file
 readme=./README.md => ${destination}/${module}/README.md [origin=${repo_dir}/tools/ifconfig/README.md]
 

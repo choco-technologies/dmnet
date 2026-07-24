@@ -51,6 +51,26 @@ static void print_mac_address(const dmnetif_mac_addr_t* mac)
                 mac->addr[3], mac->addr[4], mac->addr[5]);
 }
 
+/* IPv6 printed as 8 plain hex groups (no "::" run-length compression) -
+ * more verbose than canonical form, but unambiguous and simple. */
+static void print_ip_address(const dmnetif_ip_addr_t* ip)
+{
+    if (ip->family == dmnetif_ip_family_v4)
+    {
+        Dmod_Printf("          inet addr:%u.%u.%u.%u\n",
+                    ip->addr.v4[0], ip->addr.v4[1], ip->addr.v4[2], ip->addr.v4[3]);
+    }
+    else if (ip->family == dmnetif_ip_family_v6)
+    {
+        Dmod_Printf("          inet6 addr:");
+        for (int i = 0; i < DMNETIF_IPV6_ADDR_LEN; i += 2)
+        {
+            Dmod_Printf("%s%02x%02x", (i > 0) ? ":" : "", ip->addr.v6[i], ip->addr.v6[i + 1]);
+        }
+        Dmod_Printf("\n");
+    }
+}
+
 static void print_interface(dmnetif_iface_t iface)
 {
     const char* name = dmnetif_get_name(iface);
@@ -66,6 +86,12 @@ static void print_interface(dmnetif_iface_t iface)
         Dmod_Printf("(unknown)");
     }
     Dmod_Printf("\n");
+
+    dmnetif_ip_addr_t ip;
+    if (dmnetif_get_ip_address(iface, &ip) == 0 && ip.family != dmnetif_ip_family_none)
+    {
+        print_ip_address(&ip);
+    }
 
     Dmod_Printf("          %s  %s\n",
                 dmnetif_is_up(iface) ? "UP" : "DOWN",
