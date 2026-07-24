@@ -222,6 +222,213 @@ DMOD_TEST_STEP(set_ip_address_invalid_family_fails)
     DMOD_TEST_EXPECT_TRUE(dmnetif_set_ip_address(g_iface, &bad_ip) < 0);
 }
 
+/* ---- Netmask ---- */
+
+DMOD_TEST_STEP(netmask_starts_unassigned)
+{
+    dmnetif_ip_addr_t netmask = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_netmask(g_iface, &netmask), 0);
+    DMOD_TEST_EXPECT_EQ(netmask.family, dmnetif_ip_family_none);
+}
+
+DMOD_TEST_STEP(set_and_get_ipv4_netmask_roundtrips)
+{
+    dmnetif_ip_addr_t set_netmask = { 0 };
+    set_netmask.family = dmnetif_ip_family_v4;
+    set_netmask.addr.v4[0] = 255;
+    set_netmask.addr.v4[1] = 255;
+    set_netmask.addr.v4[2] = 255;
+    set_netmask.addr.v4[3] = 0;
+    DMOD_TEST_EXPECT_EQ(dmnetif_set_netmask(g_iface, &set_netmask), 0);
+
+    dmnetif_ip_addr_t got_netmask = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_netmask(g_iface, &got_netmask), 0);
+    DMOD_TEST_EXPECT_EQ(got_netmask.family, dmnetif_ip_family_v4);
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(got_netmask.addr.v4, set_netmask.addr.v4, DMNETIF_IPV4_ADDR_LEN));
+}
+
+DMOD_TEST_STEP(set_and_get_ipv6_netmask_roundtrips)
+{
+    dmnetif_ip_addr_t set_netmask = { 0 };
+    set_netmask.family = dmnetif_ip_family_v6;
+    for (int i = 0; i < DMNETIF_IPV6_ADDR_LEN; i++)
+    {
+        set_netmask.addr.v6[i] = 0xFF;
+    }
+    DMOD_TEST_EXPECT_EQ(dmnetif_set_netmask(g_iface, &set_netmask), 0);
+
+    dmnetif_ip_addr_t got_netmask = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_netmask(g_iface, &got_netmask), 0);
+    DMOD_TEST_EXPECT_EQ(got_netmask.family, dmnetif_ip_family_v6);
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(got_netmask.addr.v6, set_netmask.addr.v6, DMNETIF_IPV6_ADDR_LEN));
+}
+
+DMOD_TEST_STEP(set_netmask_none_clears_it)
+{
+    dmnetif_ip_addr_t v4_netmask = { 0 };
+    v4_netmask.family = dmnetif_ip_family_v4;
+    DMOD_TEST_EXPECT_EQ(dmnetif_set_netmask(g_iface, &v4_netmask), 0);
+
+    dmnetif_ip_addr_t clear_netmask = { 0 };
+    clear_netmask.family = dmnetif_ip_family_none;
+    DMOD_TEST_EXPECT_EQ(dmnetif_set_netmask(g_iface, &clear_netmask), 0);
+
+    dmnetif_ip_addr_t got_netmask = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_netmask(g_iface, &got_netmask), 0);
+    DMOD_TEST_EXPECT_EQ(got_netmask.family, dmnetif_ip_family_none);
+}
+
+DMOD_TEST_STEP(set_netmask_invalid_family_fails)
+{
+    dmnetif_ip_addr_t bad_netmask = { 0 };
+    bad_netmask.family = (dmnetif_ip_family_t)7;
+    DMOD_TEST_EXPECT_TRUE(dmnetif_set_netmask(g_iface, &bad_netmask) < 0);
+}
+
+DMOD_TEST_STEP(invalid_handle_netmask_returns_error)
+{
+    dmnetif_ip_addr_t netmask = { 0 };
+    DMOD_TEST_EXPECT_TRUE(dmnetif_get_netmask(NULL, &netmask) < 0);
+    DMOD_TEST_EXPECT_TRUE(dmnetif_set_netmask(NULL, &netmask) < 0);
+}
+
+/* ---- Broadcast address ---- */
+
+DMOD_TEST_STEP(broadcast_starts_unassigned)
+{
+    dmnetif_ip_addr_t broadcast = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_broadcast(g_iface, &broadcast), 0);
+    DMOD_TEST_EXPECT_EQ(broadcast.family, dmnetif_ip_family_none);
+}
+
+DMOD_TEST_STEP(set_and_get_ipv4_broadcast_roundtrips)
+{
+    dmnetif_ip_addr_t set_broadcast = { 0 };
+    set_broadcast.family = dmnetif_ip_family_v4;
+    set_broadcast.addr.v4[0] = 192;
+    set_broadcast.addr.v4[1] = 168;
+    set_broadcast.addr.v4[2] = 1;
+    set_broadcast.addr.v4[3] = 255;
+    DMOD_TEST_EXPECT_EQ(dmnetif_set_broadcast(g_iface, &set_broadcast), 0);
+
+    dmnetif_ip_addr_t got_broadcast = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_broadcast(g_iface, &got_broadcast), 0);
+    DMOD_TEST_EXPECT_EQ(got_broadcast.family, dmnetif_ip_family_v4);
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(got_broadcast.addr.v4, set_broadcast.addr.v4, DMNETIF_IPV4_ADDR_LEN));
+}
+
+DMOD_TEST_STEP(set_and_get_ipv6_broadcast_roundtrips)
+{
+    dmnetif_ip_addr_t set_broadcast = { 0 };
+    set_broadcast.family = dmnetif_ip_family_v6;
+    for (int i = 0; i < DMNETIF_IPV6_ADDR_LEN; i++)
+    {
+        set_broadcast.addr.v6[i] = 0xAA;
+    }
+    DMOD_TEST_EXPECT_EQ(dmnetif_set_broadcast(g_iface, &set_broadcast), 0);
+
+    dmnetif_ip_addr_t got_broadcast = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_broadcast(g_iface, &got_broadcast), 0);
+    DMOD_TEST_EXPECT_EQ(got_broadcast.family, dmnetif_ip_family_v6);
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(got_broadcast.addr.v6, set_broadcast.addr.v6, DMNETIF_IPV6_ADDR_LEN));
+}
+
+DMOD_TEST_STEP(set_broadcast_none_clears_it)
+{
+    dmnetif_ip_addr_t v4_broadcast = { 0 };
+    v4_broadcast.family = dmnetif_ip_family_v4;
+    DMOD_TEST_EXPECT_EQ(dmnetif_set_broadcast(g_iface, &v4_broadcast), 0);
+
+    dmnetif_ip_addr_t clear_broadcast = { 0 };
+    clear_broadcast.family = dmnetif_ip_family_none;
+    DMOD_TEST_EXPECT_EQ(dmnetif_set_broadcast(g_iface, &clear_broadcast), 0);
+
+    dmnetif_ip_addr_t got_broadcast = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_broadcast(g_iface, &got_broadcast), 0);
+    DMOD_TEST_EXPECT_EQ(got_broadcast.family, dmnetif_ip_family_none);
+}
+
+DMOD_TEST_STEP(set_broadcast_invalid_family_fails)
+{
+    dmnetif_ip_addr_t bad_broadcast = { 0 };
+    bad_broadcast.family = (dmnetif_ip_family_t)7;
+    DMOD_TEST_EXPECT_TRUE(dmnetif_set_broadcast(g_iface, &bad_broadcast) < 0);
+}
+
+DMOD_TEST_STEP(invalid_handle_broadcast_returns_error)
+{
+    dmnetif_ip_addr_t broadcast = { 0 };
+    DMOD_TEST_EXPECT_TRUE(dmnetif_get_broadcast(NULL, &broadcast) < 0);
+    DMOD_TEST_EXPECT_TRUE(dmnetif_set_broadcast(NULL, &broadcast) < 0);
+}
+
+/* ---- MTU ---- */
+
+DMOD_TEST_STEP(mtu_starts_at_default)
+{
+    uint16_t mtu = 0;
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_mtu(g_iface, &mtu), 0);
+    DMOD_TEST_EXPECT_EQ(mtu, (uint16_t)DMNETIF_DEFAULT_MTU);
+}
+
+DMOD_TEST_STEP(set_and_get_mtu_roundtrips)
+{
+    DMOD_TEST_EXPECT_EQ(dmnetif_set_mtu(g_iface, 1400), 0);
+
+    uint16_t mtu = 0;
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_mtu(g_iface, &mtu), 0);
+    DMOD_TEST_EXPECT_EQ(mtu, (uint16_t)1400);
+}
+
+DMOD_TEST_STEP(set_mtu_zero_fails)
+{
+    DMOD_TEST_EXPECT_TRUE(dmnetif_set_mtu(g_iface, 0) < 0);
+}
+
+/* ---- Statistics ---- */
+
+DMOD_TEST_STEP(stats_start_at_zero)
+{
+    dmnetif_stats_t stats;
+    memset(&stats, 0xFF, sizeof(stats)); /* poison, so a no-op get would be caught */
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_stats(g_iface, &stats), 0);
+    DMOD_TEST_EXPECT_EQ(stats.rx_packets, (uint32_t)0);
+    DMOD_TEST_EXPECT_EQ(stats.rx_bytes, (uint32_t)0);
+    DMOD_TEST_EXPECT_EQ(stats.tx_packets, (uint32_t)0);
+    DMOD_TEST_EXPECT_EQ(stats.tx_bytes, (uint32_t)0);
+    DMOD_TEST_EXPECT_EQ(stats.tx_errors, (uint32_t)0);
+}
+
+DMOD_TEST_STEP(stats_unaffected_by_send_receive_while_down)
+{
+    /* Real counter increments need a real driver behind an "up" interface
+     * (dmnetif_up() fails with -ENOSYS against this stand-in device, per
+     * not_started_interface_send_receive_return_zero above) - what's
+     * testable here is that a no-op send/receive on a down interface
+     * doesn't touch the counters either. */
+    uint8_t buffer[8] = { 0 };
+    dmnetif_send(g_iface, buffer, sizeof(buffer));
+    dmnetif_receive(g_iface, buffer, sizeof(buffer));
+
+    dmnetif_stats_t stats;
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_stats(g_iface, &stats), 0);
+    DMOD_TEST_EXPECT_EQ(stats.rx_packets, (uint32_t)0);
+    DMOD_TEST_EXPECT_EQ(stats.tx_packets, (uint32_t)0);
+}
+
+DMOD_TEST_STEP(invalid_handle_mtu_returns_error)
+{
+    uint16_t mtu = 0;
+    DMOD_TEST_EXPECT_TRUE(dmnetif_get_mtu(NULL, &mtu) < 0);
+    DMOD_TEST_EXPECT_TRUE(dmnetif_set_mtu(NULL, 1500) < 0);
+}
+
+DMOD_TEST_STEP(invalid_handle_stats_returns_error)
+{
+    dmnetif_stats_t stats;
+    DMOD_TEST_EXPECT_TRUE(dmnetif_get_stats(NULL, &stats) < 0);
+}
+
 /* ---- Invalid-handle error paths ---- */
 
 DMOD_TEST_STEP(invalid_handle_state_control_returns_errors)

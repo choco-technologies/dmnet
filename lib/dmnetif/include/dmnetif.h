@@ -245,6 +245,39 @@ dmod_dmnetif_api(1.0, bool, _is_up, ( dmnetif_iface_t iface ));
 dmod_dmnetif_api(1.0, dmnetif_link_status_t, _get_link_status, ( dmnetif_iface_t iface ));
 
 /* ============================================================================
+ *                      MTU
+ * ========================================================================== */
+
+/**
+ * @brief Default MTU (bytes) a newly registered interface starts with -
+ *        the standard Ethernet payload size
+ */
+#define DMNETIF_DEFAULT_MTU 1500
+
+/**
+ * @brief Get an interface's MTU
+ *
+ * Purely local bookkeeping, like the IP address - there is no dmdrvi ioctl
+ * for this, the driver has no notion of it.
+ *
+ * @param iface Interface handle
+ * @param mtu   Output buffer for the MTU
+ *
+ * @return 0 on success, negative errno on failure (invalid iface or NULL mtu)
+ */
+dmod_dmnetif_api(1.0, int, _get_mtu, ( dmnetif_iface_t iface, uint16_t* mtu ));
+
+/**
+ * @brief Set an interface's MTU
+ *
+ * @param iface Interface handle
+ * @param mtu   MTU in bytes, must be non-zero
+ *
+ * @return 0 on success, negative errno on failure (invalid iface or mtu == 0)
+ */
+dmod_dmnetif_api(1.0, int, _set_mtu, ( dmnetif_iface_t iface, uint16_t mtu ));
+
+/* ============================================================================
  *                      MAC address
  * ========================================================================== */
 
@@ -302,6 +335,73 @@ dmod_dmnetif_api(1.0, int, _get_ip_address, ( dmnetif_iface_t iface, dmnetif_ip_
  */
 dmod_dmnetif_api(1.0, int, _set_ip_address, ( dmnetif_iface_t iface, const dmnetif_ip_addr_t* ip ));
 
+/**
+ * @brief Get an interface's currently assigned netmask
+ *
+ * Reuses dmnetif_ip_addr_t rather than a dedicated type: a netmask is
+ * shaped exactly like an address (4 or 16 raw bytes, discriminated by
+ * family) - an IPv4 netmask is conventionally written as a dotted-quad
+ * value (e.g. "255.255.255.0") for exactly this reason. Nothing populates
+ * this yet (no ioctl, no CLI command) - it's here for whatever assigns
+ * addresses above dmnetif (DHCP client or static config in networkd) to
+ * fill in alongside the address itself.
+ *
+ * @param iface   Interface handle
+ * @param netmask Output buffer. On success, netmask->family is
+ *                dmnetif_ip_family_none if none has been assigned yet
+ *
+ * @return 0 on success, negative errno on failure (invalid iface or NULL netmask)
+ */
+dmod_dmnetif_api(1.0, int, _get_netmask, ( dmnetif_iface_t iface, dmnetif_ip_addr_t* netmask ));
+
+/**
+ * @brief Set an interface's netmask
+ *
+ * Purely local bookkeeping, same as dmnetif_set_ip_address() - no dmdrvi
+ * ioctl, the driver has no notion of it.
+ *
+ * @param iface   Interface handle
+ * @param netmask Netmask to assign (family must be dmnetif_ip_family_v4 or
+ *                _v6; pass dmnetif_ip_family_none to clear it)
+ *
+ * @return 0 on success, negative errno on failure (invalid iface, NULL
+ *         netmask, or an unrecognized family)
+ */
+dmod_dmnetif_api(1.0, int, _set_netmask, ( dmnetif_iface_t iface, const dmnetif_ip_addr_t* netmask ));
+
+/**
+ * @brief Get an interface's currently assigned broadcast address
+ *
+ * Reuses dmnetif_ip_addr_t, same as the netmask - a broadcast address is
+ * shaped exactly like a regular address.
+ *
+ * @param iface     Interface handle
+ * @param broadcast Output buffer. On success, broadcast->family is
+ *                  dmnetif_ip_family_none if none has been assigned yet
+ *
+ * @return 0 on success, negative errno on failure (invalid iface or NULL broadcast)
+ */
+dmod_dmnetif_api(1.0, int, _get_broadcast, ( dmnetif_iface_t iface, dmnetif_ip_addr_t* broadcast ));
+
+/**
+ * @brief Set an interface's broadcast address
+ *
+ * Purely local bookkeeping, same as dmnetif_set_ip_address()/_set_netmask()
+ * - no dmdrvi ioctl, the driver has no notion of it. Settable directly from
+ * `ifconfig` (`ifconfig <iface> broadcast <addr>`), unlike the address and
+ * netmask which are only ever assigned by whatever runs above dmnetif
+ * (DHCP client or static config in networkd).
+ *
+ * @param iface     Interface handle
+ * @param broadcast Broadcast address to assign (family must be
+ *                  dmnetif_ip_family_v4 or _v6; pass dmnetif_ip_family_none
+ *                  to clear it)
+ *
+ * @return 0 on success, negative errno on failure (invalid iface, NULL
+ *         broadcast, or an unrecognized family)
+ */
+dmod_dmnetif_api(1.0, int, _set_broadcast, ( dmnetif_iface_t iface, const dmnetif_ip_addr_t* broadcast ));
+
 /* ============================================================================
  *                      Frame I/O (bridge to the network stack)
  * ========================================================================== */
@@ -337,6 +437,43 @@ dmod_dmnetif_api(1.0, size_t, _send, ( dmnetif_iface_t iface, const void* frame,
  * @return Bytes actually received, or 0 if none were available
  */
 dmod_dmnetif_api(1.0, size_t, _receive, ( dmnetif_iface_t iface, void* buffer, size_t size ));
+
+/* ============================================================================
+ *                      Statistics
+ * ========================================================================== */
+
+/**
+ * @brief Per-interface packet counters, updated by dmnetif_send()/_receive()
+ *
+ * There is no rx_errors counter: dmnetif_receive() returning 0 means either
+ * "no frame currently pending" or a genuine read failure - the underlying
+ * dmdrvi read() contract does not distinguish the two, so counting one as
+ * an error would be misleading. dmnetif_send() returning 0 while the
+ * interface is up is unambiguously the driver rejecting the frame, which
+ * tx_errors does track.
+ *
+ * Counters wrap on overflow like any other embedded packet counter (no
+ * saturation) - callers that care about wraparound should sample often
+ * enough relative to traffic volume.
+ */
+typedef struct
+{
+    uint32_t rx_packets;    /**< Frames received via dmnetif_receive() */
+    uint32_t rx_bytes;      /**< Bytes received via dmnetif_receive() */
+    uint32_t tx_packets;    /**< Frames sent via dmnetif_send() */
+    uint32_t tx_bytes;      /**< Bytes sent via dmnetif_send() */
+    uint32_t tx_errors;     /**< dmnetif_send() calls where the interface was up but the driver rejected the frame */
+} dmnetif_stats_t;
+
+/**
+ * @brief Get an interface's packet statistics
+ *
+ * @param iface Interface handle
+ * @param stats Output buffer for the statistics
+ *
+ * @return 0 on success, negative errno on failure (invalid iface or NULL stats)
+ */
+dmod_dmnetif_api(1.0, int, _get_stats, ( dmnetif_iface_t iface, dmnetif_stats_t* stats ));
 
 /* ============================================================================
  *                      Escape hatch

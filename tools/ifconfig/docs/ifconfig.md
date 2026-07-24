@@ -11,35 +11,57 @@ and the handle that returns.
 ## Usage
 
 ```
-ifconfig                          List all interfaces
-ifconfig <iface>                  Show one interface
-ifconfig <iface> up               Bring an interface up
-ifconfig <iface> down             Bring an interface down
-ifconfig <iface> hw ether <mac>   Set the interface's MAC address
+ifconfig                              List all interfaces
+ifconfig --help | -h                  Show this help
+ifconfig <iface>                      Show one interface
+ifconfig <name> create <device_path>  Register a new interface backed by a devfs node
+ifconfig <iface> up                   Bring an interface up
+ifconfig <iface> down                 Bring an interface down
+ifconfig <iface> mtu <bytes>          Set the interface's MTU
+ifconfig <iface> hw ether <mac>       Set the interface's MAC address
+ifconfig <iface> broadcast <addr>     Set the interface's IPv4 broadcast address
 ```
 
-Example output:
+Example output (follows net-tools' Linux `ifconfig` format, minus any
+field dmnetif has no concept of - no dropped/overruns/collisions):
 
 ```
 $ ifconfig
-eth0       Link encap:Ethernet  HWaddr 02:00:00:00:00:01
-          inet addr:192.168.1.42
-          UP  LINK-UP
+eth0: flags=<UP,RUNNING>  mtu 1500
+        inet 192.168.1.42  netmask 255.255.255.0  broadcast 192.168.1.255
+        ether 02:00:00:00:00:01  (Ethernet)
+        RX packets 12  bytes 3456
+        TX packets 8  bytes 987  errors 0
 
 ```
 
 The `inet`/`inet6` line is only printed once an IP address has actually
 been assigned to the interface (via `dmnetif_set_ip_address()`, e.g. by a
 DHCP client or static config in `networkd`) - `ifconfig` itself has no
-command to assign one, only to display it.
+command to assign the address or netmask, only to display them once
+something else has. The broadcast address is the one exception: it's both
+displayed and settable directly (`ifconfig <iface> broadcast <addr>`).
+There is deliberately no `RX errors` line: `dmnetif_receive()` returning 0
+means either "nothing pending" or a genuine read failure, indistinguishable
+at that layer, so a fabricated RX error counter would be misleading. `TX
+errors` is real - the driver rejecting a frame from an up interface is
+unambiguous.
+
+`ifconfig <name> create <device_path>` registers a brand new interface via
+`dmnetif_register()` - the only command that doesn't require `<name>` to
+already exist. See `lib/dmnetif/docs/dmnetif.md`'s "Registration flow" for
+how this compares to a driver registering its own interface.
 
 ## Exit codes
 
-- `0` - success (including "no interfaces registered" for the no-args form)
-- `1` - failure: unknown interface name, bad/unsupported command syntax, an
-  invalid MAC address string, or the underlying driver rejecting the
-  requested operation (e.g. `up`/`down`/`hw ether` return whatever
-  `dmnetif_up()`/`_down()`/`_set_mac_address()` report)
+- `0` - success (including "no interfaces registered" for the no-args form,
+  and `--help`/`-h`)
+- `1` - failure: unknown interface name (except for `create`, where it's
+  expected not to exist yet), bad/unsupported command syntax, an invalid
+  MAC/MTU/broadcast value, a device path `create` couldn't open, or the
+  underlying driver rejecting the requested operation (e.g. `up`/`down`/
+  `mtu`/`hw ether` return whatever `dmnetif_up()`/`_down()`/`_set_mtu()`/
+  `_set_mac_address()` report)
 
 ## Testing
 

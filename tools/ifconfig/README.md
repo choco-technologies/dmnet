@@ -10,26 +10,48 @@ devfs paths or `dmdrvi` directly, only interface names, the same boundary
 ## Usage
 
 ```
-ifconfig                          List all interfaces
-ifconfig <iface>                  Show one interface
-ifconfig <iface> up               Bring an interface up
-ifconfig <iface> down             Bring an interface down
-ifconfig <iface> hw ether <mac>   Set the interface's MAC address
+ifconfig                              List all interfaces
+ifconfig --help | -h                  Show this help
+ifconfig <iface>                      Show one interface
+ifconfig <name> create <device_path>  Register a new interface backed by a devfs node
+ifconfig <iface> up                   Bring an interface up
+ifconfig <iface> down                 Bring an interface down
+ifconfig <iface> mtu <bytes>          Set the interface's MTU
+ifconfig <iface> hw ether <mac>       Set the interface's MAC address
+ifconfig <iface> broadcast <addr>     Set the interface's IPv4 broadcast address
 ```
 
-Example output:
+Example output (follows net-tools' Linux `ifconfig` format, minus any
+field dmnetif has no concept of - no dropped/overruns/collisions):
 
 ```
 $ ifconfig
-eth0       Link encap:Ethernet  HWaddr 02:00:00:00:00:01
-          inet addr:192.168.1.42
-          UP  LINK-UP
+eth0: flags=<UP,RUNNING>  mtu 1500
+        inet 192.168.1.42  netmask 255.255.255.0  broadcast 192.168.1.255
+        ether 02:00:00:00:00:01  (Ethernet)
+        RX packets 12  bytes 3456
+        TX packets 8  bytes 987  errors 0
 
 ```
 
 The `inet`/`inet6` line is only printed once an IP address has actually
 been assigned to the interface (via `dmnetif_set_ip_address()` - there is
-no `ifconfig <iface> inet <addr>`-style command yet, only display).
+no `ifconfig <iface> inet <addr>`-style command yet, only display); the
+`netmask`/`broadcast` parts of that line only appear once those are
+assigned too (`dmnetif_set_netmask()`, or `ifconfig <iface> broadcast
+<addr>` for the broadcast address - unlike the address and netmask, that
+one is directly settable from `ifconfig`). There is no `RX errors` line
+either - `dmnetif_receive()` returning 0 means either "nothing pending" or
+a genuine read failure, indistinguishable at that layer, so a fabricated RX
+error counter would be misleading; `TX errors` is real (the driver
+rejecting a frame from an up interface is unambiguous).
+
+`ifconfig <name> create <device_path>` is the one command that doesn't
+require `<name>` to already be a registered interface - it calls
+`dmnetif_register()` directly, the same call a driver would make from its
+own `dmdrvi_path_ready()` (see `lib/dmnetif/docs/dmnetif.md`). Useful for
+registering an interface manually - e.g. without a real driver, for
+testing.
 
 ## Building
 

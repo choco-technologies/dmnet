@@ -3,12 +3,6 @@
 See [dmnetif.md](dmnetif.md) for the architecture and rationale behind this
 API's shape.
 
-> **Note:** no real network driver registers with dmnetif yet - `dmeth`
-> doesn't call `dmnetif_register()` from its `dmdrvi_path_ready()` yet (see
-> [dmnetif.md](dmnetif.md#registration-flow)). The registry itself
-> (register/unregister/find/count/for_each) is fully implemented and tested
-> against `/dev/null` as a stand-in device file - see `tests/dmnetif_test.c`.
-
 ## Types
 
 | Type                       | Description                                                       |
@@ -18,6 +12,7 @@ API's shape.
 | `dmnetif_ip_family_t`      | `dmnetif_ip_family_none` \| `_v4` \| `_v6`                          |
 | `dmnetif_ip_addr_t`        | `{ family; union { v4[4]; v6[16]; } addr; }` - one type for both IPv4 and IPv6, discriminated by `family` |
 | `dmnetif_link_status_t`    | `dmnetif_link_down` \| `dmnetif_link_up`                            |
+| `dmnetif_stats_t`          | `{ rx_packets; rx_bytes; tx_packets; tx_bytes; tx_errors; }` - packet counters, see `dmnetif_get_stats()` |
 | `dmnetif_iterator_func_t`  | `bool (*)(dmnetif_iface_t iface, void* user_data)` - see `dmnetif_for_each()` |
 
 ## Registration (driver-facing)
@@ -45,6 +40,13 @@ API's shape.
 | `dmnetif_is_up(iface)`          | Whether `dmnetif_up()` has been called without a matching `dmnetif_down()`. |
 | `dmnetif_get_link_status(iface)`| Query the current link status from the driver.           |
 
+## MTU
+
+| Function                        | Description                                             |
+|-----------------------------------|-------------------------------------------------------------|
+| `dmnetif_get_mtu(iface, mtu)`    | Read the interface's MTU (`DMNETIF_DEFAULT_MTU` = 1500 until set). |
+| `dmnetif_set_mtu(iface, mtu)`   | Set the interface's MTU. Fails on `mtu == 0`. Local bookkeeping only, same as the IP address - no dmdrvi ioctl. |
+
 ## MAC address
 
 | Function                                          | Description               |
@@ -58,6 +60,10 @@ API's shape.
 |------------------------------------------------------|-------------------------------|
 | `dmnetif_get_ip_address(iface, ip)`                  | Read the interface's currently assigned IP address (`family` is `dmnetif_ip_family_none` if none assigned). |
 | `dmnetif_set_ip_address(iface, ip)`                  | Assign (or, with `dmnetif_ip_family_none`, clear) the interface's IP address. Local bookkeeping only - no dmdrvi ioctl, since IP addresses are a network-layer concept the driver has no notion of. |
+| `dmnetif_get_netmask(iface, netmask)`                | Read the interface's currently assigned netmask (`family` is `dmnetif_ip_family_none` if none assigned). Reuses `dmnetif_ip_addr_t` - a netmask is shaped exactly like an address. Nothing sets this via ioctl or CLI yet - `ifconfig` only displays it. |
+| `dmnetif_set_netmask(iface, netmask)`                | Assign (or clear) the interface's netmask. Local bookkeeping only, same as the address. |
+| `dmnetif_get_broadcast(iface, broadcast)`            | Read the interface's currently assigned broadcast address (`family` is `dmnetif_ip_family_none` if none assigned). |
+| `dmnetif_set_broadcast(iface, broadcast)`            | Assign (or clear) the interface's broadcast address. Local bookkeeping only. Settable directly via `ifconfig <iface> broadcast <addr>`. |
 
 ## Frame I/O
 
@@ -65,6 +71,12 @@ API's shape.
 |-----------------------------------------------|-----------------------------------------------------------------------|
 | `dmnetif_send(iface, frame, length)`         | Transmit one frame. Returns bytes actually sent.                     |
 | `dmnetif_receive(iface, buffer, size)`       | Receive one frame if available (non-blocking). Returns bytes actually received. |
+
+## Statistics
+
+| Function                                    | Description                                                        |
+|-----------------------------------------------|-----------------------------------------------------------------------|
+| `dmnetif_get_stats(iface, stats)`            | Read the interface's packet counters, updated by `dmnetif_send()`/`_receive()`. No `rx_errors` field - see `dmnetif_stats_t`'s doc comment for why. |
 
 ## Escape hatch
 

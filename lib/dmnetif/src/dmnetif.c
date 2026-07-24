@@ -43,6 +43,10 @@ struct dmnetif_iface
     void*              file;                            /**< Handle returned by Dmod_FileOpen(device_path, "r+"), kept open for the interface's lifetime */
     bool               up;                               /**< Whether dmnetif_up() has been applied without a matching dmnetif_down() since */
     dmnetif_ip_addr_t  ip;                                /**< Currently assigned IP address; family is dmnetif_ip_family_none until dmnetif_set_ip_address() is called */
+    dmnetif_ip_addr_t  netmask;                            /**< Currently assigned netmask; family is dmnetif_ip_family_none until dmnetif_set_netmask() is called */
+    dmnetif_ip_addr_t  broadcast;                          /**< Currently assigned broadcast address; family is dmnetif_ip_family_none until dmnetif_set_broadcast() is called */
+    uint16_t           mtu;                                /**< MTU in bytes; DMNETIF_DEFAULT_MTU until dmnetif_set_mtu() is called */
+    dmnetif_stats_t    stats;                              /**< Packet counters, updated by dmnetif_send()/_receive() */
 };
 
 /**
@@ -122,6 +126,23 @@ static int compare_pointer(const void* data, const void* user_data)
  *
  * @param iface Interface to tear down (must be a valid, non-NULL handle)
  */
+/**
+ * @brief Check whether an IP family value is one dmnetif recognizes
+ *
+ * Shared by dmnetif_set_ip_address() and dmnetif_set_netmask(), which both
+ * accept the same three values (none/v4/v6).
+ *
+ * @param family Value to check
+ *
+ * @return true if family is dmnetif_ip_family_none/_v4/_v6
+ */
+static bool is_valid_ip_family(dmnetif_ip_family_t family)
+{
+    return family == dmnetif_ip_family_none ||
+           family == dmnetif_ip_family_v4 ||
+           family == dmnetif_ip_family_v6;
+}
+
 static void close_iface(struct dmnetif_iface* iface)
 {
     if (iface->up)
@@ -206,6 +227,7 @@ dmod_dmnetif_api_declaration(1.0, dmnetif_iface_t, _register, ( const char* name
 
     memset(iface, 0, sizeof(*iface));
     iface->magic = DMNETIF_CONTEXT_MAGIC;
+    iface->mtu = DMNETIF_DEFAULT_MTU;
     Dmod_SnPrintf(iface->name, sizeof(iface->name), "%s", name);
     iface->device_path = Dmod_StrDup(device_path);
     iface->file = (iface->device_path != NULL) ? Dmod_FileOpen(device_path, "r+") : NULL;
@@ -383,6 +405,32 @@ dmod_dmnetif_api_declaration(1.0, dmnetif_link_status_t, _get_link_status, ( dmn
     return (status == DMDRVI_NET_LINK_UP) ? dmnetif_link_up : dmnetif_link_down;
 }
 
+/* ---- MTU ---- */
+
+/**
+ * @brief Implementation of dmnetif_get_mtu() - see dmnetif.h
+ */
+dmod_dmnetif_api_declaration(1.0, int, _get_mtu, ( dmnetif_iface_t iface, uint16_t* mtu ))
+{
+    if (!is_valid_iface(iface) || mtu == NULL)
+        return -EINVAL;
+
+    *mtu = iface->mtu;
+    return 0;
+}
+
+/**
+ * @brief Implementation of dmnetif_set_mtu() - see dmnetif.h
+ */
+dmod_dmnetif_api_declaration(1.0, int, _set_mtu, ( dmnetif_iface_t iface, uint16_t mtu ))
+{
+    if (!is_valid_iface(iface) || mtu == 0)
+        return -EINVAL;
+
+    iface->mtu = mtu;
+    return 0;
+}
+
 /* ---- MAC address ---- */
 
 /**
@@ -437,15 +485,73 @@ dmod_dmnetif_api_declaration(1.0, int, _set_ip_address, ( dmnetif_iface_t iface,
     if (!is_valid_iface(iface) || ip == NULL)
         return -EINVAL;
 
-    if (ip->family != dmnetif_ip_family_none &&
-        ip->family != dmnetif_ip_family_v4 &&
-        ip->family != dmnetif_ip_family_v6)
+    if (!is_valid_ip_family(ip->family))
     {
         DMOD_LOG_ERROR("dmnetif_set_ip_address: unrecognized IP family %d\n", (int)ip->family);
         return -EINVAL;
     }
 
     iface->ip = *ip;
+    return 0;
+}
+
+/**
+ * @brief Implementation of dmnetif_get_netmask() - see dmnetif.h
+ */
+dmod_dmnetif_api_declaration(1.0, int, _get_netmask, ( dmnetif_iface_t iface, dmnetif_ip_addr_t* netmask ))
+{
+    if (!is_valid_iface(iface) || netmask == NULL)
+        return -EINVAL;
+
+    *netmask = iface->netmask;
+    return 0;
+}
+
+/**
+ * @brief Implementation of dmnetif_set_netmask() - see dmnetif.h
+ */
+dmod_dmnetif_api_declaration(1.0, int, _set_netmask, ( dmnetif_iface_t iface, const dmnetif_ip_addr_t* netmask ))
+{
+    if (!is_valid_iface(iface) || netmask == NULL)
+        return -EINVAL;
+
+    if (!is_valid_ip_family(netmask->family))
+    {
+        DMOD_LOG_ERROR("dmnetif_set_netmask: unrecognized IP family %d\n", (int)netmask->family);
+        return -EINVAL;
+    }
+
+    iface->netmask = *netmask;
+    return 0;
+}
+
+/**
+ * @brief Implementation of dmnetif_get_broadcast() - see dmnetif.h
+ */
+dmod_dmnetif_api_declaration(1.0, int, _get_broadcast, ( dmnetif_iface_t iface, dmnetif_ip_addr_t* broadcast ))
+{
+    if (!is_valid_iface(iface) || broadcast == NULL)
+        return -EINVAL;
+
+    *broadcast = iface->broadcast;
+    return 0;
+}
+
+/**
+ * @brief Implementation of dmnetif_set_broadcast() - see dmnetif.h
+ */
+dmod_dmnetif_api_declaration(1.0, int, _set_broadcast, ( dmnetif_iface_t iface, const dmnetif_ip_addr_t* broadcast ))
+{
+    if (!is_valid_iface(iface) || broadcast == NULL)
+        return -EINVAL;
+
+    if (!is_valid_ip_family(broadcast->family))
+    {
+        DMOD_LOG_ERROR("dmnetif_set_broadcast: unrecognized IP family %d\n", (int)broadcast->family);
+        return -EINVAL;
+    }
+
+    iface->broadcast = *broadcast;
     return 0;
 }
 
@@ -459,7 +565,17 @@ dmod_dmnetif_api_declaration(1.0, size_t, _send, ( dmnetif_iface_t iface, const 
     if (!is_valid_iface(iface) || frame == NULL || length == 0 || !iface->up)
         return 0;
 
-    return Dmod_FileWrite(frame, 1, length, iface->file);
+    size_t sent = Dmod_FileWrite(frame, 1, length, iface->file);
+    if (sent > 0)
+    {
+        iface->stats.tx_packets++;
+        iface->stats.tx_bytes += (uint32_t)sent;
+    }
+    else
+    {
+        iface->stats.tx_errors++;
+    }
+    return sent;
 }
 
 /**
@@ -470,7 +586,27 @@ dmod_dmnetif_api_declaration(1.0, size_t, _receive, ( dmnetif_iface_t iface, voi
     if (!is_valid_iface(iface) || buffer == NULL || size == 0 || !iface->up)
         return 0;
 
-    return Dmod_FileRead(buffer, 1, size, iface->file);
+    size_t received = Dmod_FileRead(buffer, 1, size, iface->file);
+    if (received > 0)
+    {
+        iface->stats.rx_packets++;
+        iface->stats.rx_bytes += (uint32_t)received;
+    }
+    return received;
+}
+
+/* ---- Statistics ---- */
+
+/**
+ * @brief Implementation of dmnetif_get_stats() - see dmnetif.h
+ */
+dmod_dmnetif_api_declaration(1.0, int, _get_stats, ( dmnetif_iface_t iface, dmnetif_stats_t* stats ))
+{
+    if (!is_valid_iface(iface) || stats == NULL)
+        return -EINVAL;
+
+    *stats = iface->stats;
+    return 0;
 }
 
 /* ---- Escape hatch ---- */

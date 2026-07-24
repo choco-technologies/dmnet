@@ -26,8 +26,14 @@ docs=./docs => ${destination}/${module}/docs [origin=${repo_dir}/tools/ifconfig/
 # README file
 readme=./README.md => ${destination}/${module}/README.md [origin=${repo_dir}/tools/ifconfig/README.md]
 
-# No include/ entry - this is a CLI application with no public header of
-# its own (its API is dmnetif's, see lib/dmnetif).
+# === Header Files ===
+# No committed include/ dir of its own (its API is dmnetif's, see
+# lib/dmnetif) - just the generated module definitions header every DMOD
+# module gets, so dmf-man/consumers can still see it. Destination must be a
+# full *file* path (not a bare "include" dir) since there's no separate
+# directory-origin here to tell the packaging tool to treat it as one - see
+# lib/dmnetif/dmnetif.dmr's inc= entry for the directory+file combined case.
+inc=./include/${module}_defs.h => ${destination}/${module}/include/${module}_defs.h [origin=${build_dir}/tools/ifconfig/${module}_defs.h]
 
 # === License ===
 # License file - shared at the dmnet repo root (see lib/dmnetif/dmnetif.dmr
