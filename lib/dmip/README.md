@@ -2,14 +2,12 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 
-dmip DMOD library module - shared IP-layer type definitions
-(`dmip_addr_t`). Exists so [dmnetif](../dmnetif) and [dmroute](../dmroute)
-can both use the same IP address type without either one depending on the
-other for it - see [docs/dmip.md](docs/dmip.md) for why that matters.
-
-Has no public API functions and no runtime state - it's a pure header
-dependency (`dmip_if`), never actually loaded by anything that only needs
-its types.
+dmip DMOD library module - the IP layer: building/parsing IPv4 and IPv6
+headers, the IPv4 header checksum, TTL/Hop-Limit handling, identification
+generation, and fragmentation/reassembly for both families. Also holds
+`dmip_addr_t`, the address type shared by [dmnetif](../dmnetif) and
+[dmroute](../dmroute) - see [docs/dmip.md](docs/dmip.md) for the full
+rationale.
 
 ## Building
 
@@ -33,6 +31,19 @@ instead of fetching `develop` from GitHub.
 
 ```c
 #include "dmip.h"
+
+dmip_v4_header_t header = {
+    .ttl = DMIP_DEFAULT_TTL,
+    .protocol = DMIP_PROTO_UDP,
+    .identification = dmip_v4_next_identification(),
+    .src = my_addr,
+    .dst = peer_addr,
+};
+
+uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
+header.total_length = sizeof(packet);
+dmip_v4_build_header(packet, sizeof(packet), &header);
+memcpy(packet + DMIP_V4_HEADER_LEN, payload, sizeof(payload));
 ```
 
 ## Documentation
@@ -40,7 +51,7 @@ instead of fetching `develop` from GitHub.
 See the `docs/` directory:
 
 - **[dmip.md](docs/dmip.md)** - Overview and rationale
-- **[api-reference.md](docs/api-reference.md)** - Type reference
+- **[api-reference.md](docs/api-reference.md)** - Full API reference
 
 View documentation using `dmf-man dmip`.
 

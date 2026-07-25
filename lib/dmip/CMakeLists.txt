@@ -31,4 +31,13 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# dmlist: backs the fragment reassembly table
+# dmosi:  mutexes guarding reassembly/identification state, plus
+#         dmosi_get_tick_count() for reassembly timeouts - see
+#         src/dmip.c's "Reassembly" section
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmlist
+    dmosi
+)
+
 add_subdirectory(tests)
