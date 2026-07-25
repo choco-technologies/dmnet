@@ -17,5 +17,10 @@ add_subdirectory(dmroute)
 
 # dmnetif depends on dmip (dmip_addr_t) and dmroute (keeps an interface's
 # connected route in sync - see lib/dmnetif/src/dmnetif.c), so it must be
-# added last.
+# added after both.
 add_subdirectory(dmnetif)
+
+# dmarp depends on dmip (dmip_addr_t) and dmnetif (sends/receives ARP
+# frames through dmnetif_send()/_receive() - see lib/dmarp/src/dmarp.c),
+# so it must be added last. Nothing depends on dmarp in turn.
+add_subdirectory(dmarp)
