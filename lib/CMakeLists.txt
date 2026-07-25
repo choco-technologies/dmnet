@@ -4,23 +4,29 @@
 # calling dmod_add_library()), added here rather than directly from the
 # top-level CMakeLists.txt.
 
-# dmip has no dependencies of its own (see lib/dmip/docs/dmip.md) and is
-# depended on by both dmnetif and dmroute for the shared dmip_addr_t type,
-# so it must be added before either of them.
-add_subdirectory(dmip)
-
-# dmroute depends only on dmip (not dmnetif - see lib/dmroute/docs/dmroute.md
-# for why), so it can be added before or after dmnetif on its own account,
-# but must come before dmnetif here since dmnetif depends on *it*
-# (dmnetif_set_ip_address() calls dmroute_add()/_remove() directly).
+# dmroute has no dependencies of its own (see lib/dmroute/docs/dmroute.md) -
+# it owns the shared dmroute_addr_t type outright rather than borrowing it
+# from another module - so it must be added before everything else here.
 add_subdirectory(dmroute)
 
-# dmnetif depends on dmip (dmip_addr_t) and dmroute (keeps an interface's
+# dmnetif depends on dmroute (dmroute_addr_t, plus keeping an interface's
 # connected route in sync - see lib/dmnetif/src/dmnetif.c), so it must be
-# added after both.
+# added after it.
 add_subdirectory(dmnetif)
 
-# dmarp depends on dmip (dmip_addr_t) and dmnetif (sends/receives ARP
-# frames through dmnetif_send()/_receive() - see lib/dmarp/src/dmarp.c),
-# so it must be added last. Nothing depends on dmarp in turn.
+# dmarp depends on dmroute (dmroute_addr_t) and dmnetif (sends/receives ARP
+# frames through dmnetif_send()/_receive() - see lib/dmarp/src/dmarp.c), so
+# it must be added after both.
 add_subdirectory(dmarp)
+
+# dmip depends on dmroute (route lookup for its send path), dmnetif (frame
+# I/O), and dmarp (resolving a destination MAC before sending - see
+# lib/dmip/src/dmip.c) - it must be added after all three. dmip.h also
+# re-exports dmroute's address type as dmip_addr_t for source
+# compatibility (see lib/dmip/docs/dmip.md).
+add_subdirectory(dmip)
+
+# dmudp depends on dmip (dmip_v4_send()/_receive()/_v6_receive(),
+# dmip_checksum()), dmroute (dmip_addr_t's real definition), and dmnetif
+# (dmnetif_iface_t) - see lib/dmudp/docs/dmudp.md - so it must be added last.
+add_subdirectory(dmudp)

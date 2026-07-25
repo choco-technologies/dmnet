@@ -14,5 +14,5 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
 
 # dmnetif: fixture interfaces are registered directly against it (same
 # "/dev/null"-backed pattern as lib/dmnetif/tests/dmnetif_test.c).
-# dmip:    dmip_addr_t, used directly to build test addresses.
-target_link_libraries(${DMOD_MODULE_NAME} dmarp_if dmnetif_if dmip_if)
+# dmroute: dmroute_addr_t, used directly to build test addresses.
+target_link_libraries(${DMOD_MODULE_NAME} dmarp_if dmnetif_if dmroute_if)

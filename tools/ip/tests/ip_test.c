@@ -14,17 +14,16 @@
 #include "dmod_test.h"
 #include "dmroute.h"
 #include "dmnetif.h"
-#include "dmip.h"
 #include <string.h>
 
 #define TEST_DEVICE_PATH "/dev/null"
 
 static dmnetif_iface_t g_iface = NULL;
 
-static dmip_addr_t make_v4(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+static dmroute_addr_t make_v4(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
 {
-    dmip_addr_t ip = { 0 };
-    ip.family = dmip_family_v4;
+    dmroute_addr_t ip = { 0 };
+    ip.family = dmroute_family_v4;
     ip.addr.v4[0] = a;
     ip.addr.v4[1] = b;
     ip.addr.v4[2] = c;
@@ -108,7 +107,7 @@ DMOD_TEST_STEP(route_add_with_prefix_succeeds)
     char* argv[] = { "ip", "route", "add", "10.0.0.0/8", "dev", "test0" };
     DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ip", 6, argv), 0);
 
-    dmip_addr_t target = make_v4(10, 1, 2, 3);
+    dmroute_addr_t target = make_v4(10, 1, 2, 3);
     DMOD_TEST_EXPECT_NOT_NULL(dmroute_lookup(&target));
 }
 
@@ -117,17 +116,17 @@ DMOD_TEST_STEP(route_add_without_prefix_adds_host_route)
     char* argv[] = { "ip", "route", "add", "10.5.5.5", "dev", "test0" };
     DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ip", 6, argv), 0);
 
-    dmip_addr_t host = make_v4(10, 5, 5, 5);
+    dmroute_addr_t host = make_v4(10, 5, 5, 5);
     dmroute_route_t route = dmroute_lookup(&host);
     DMOD_TEST_EXPECT_NOT_NULL(route);
     if (route != NULL)
     {
-        dmip_addr_t netmask = { 0 };
+        dmroute_addr_t netmask = { 0 };
         DMOD_TEST_EXPECT_EQ(dmroute_get_netmask(route, &netmask), 0);
         DMOD_TEST_EXPECT_EQ(netmask.addr.v4[3], (uint8_t)255);
     }
 
-    dmip_addr_t neighbor = make_v4(10, 5, 5, 6);
+    dmroute_addr_t neighbor = make_v4(10, 5, 5, 6);
     DMOD_TEST_EXPECT_NULL(dmroute_lookup(&neighbor));
 }
 
@@ -136,14 +135,14 @@ DMOD_TEST_STEP(route_add_with_gateway_and_metric_succeeds)
     char* argv[] = { "ip", "route", "add", "default", "via", "192.168.1.1", "dev", "test0", "metric", "50" };
     DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ip", 10, argv), 0);
 
-    dmip_addr_t target = make_v4(8, 8, 8, 8);
+    dmroute_addr_t target = make_v4(8, 8, 8, 8);
     dmroute_route_t route = dmroute_lookup(&target);
     DMOD_TEST_EXPECT_NOT_NULL(route);
     if (route != NULL)
     {
-        dmip_addr_t gateway = { 0 };
+        dmroute_addr_t gateway = { 0 };
         DMOD_TEST_EXPECT_EQ(dmroute_get_gateway(route, &gateway), 0);
-        DMOD_TEST_EXPECT_EQ(gateway.family, dmip_family_v4);
+        DMOD_TEST_EXPECT_EQ(gateway.family, dmroute_family_v4);
         DMOD_TEST_EXPECT_EQ(gateway.addr.v4[3], (uint8_t)1);
         DMOD_TEST_EXPECT_EQ(dmroute_get_metric(route), (uint32_t)50);
     }
@@ -187,7 +186,7 @@ DMOD_TEST_STEP(route_del_removes_matching_route)
 
     DMOD_TEST_EXPECT_EQ(dmroute_count(), before - 1);
 
-    dmip_addr_t target = make_v4(10, 1, 2, 3);
+    dmroute_addr_t target = make_v4(10, 1, 2, 3);
     DMOD_TEST_EXPECT_NULL(dmroute_lookup(&target));
 }
 
@@ -233,7 +232,7 @@ DMOD_TEST_STEP(route_get_is_equivalent_to_show)
 
 DMOD_TEST_STEP(assigning_ip_registers_connected_route_visible_to_ip_route_show)
 {
-    dmip_addr_t addr = make_v4(192, 168, 1, 42);
+    dmroute_addr_t addr = make_v4(192, 168, 1, 42);
     DMOD_TEST_EXPECT_EQ(dmnetif_set_ip_address(g_iface, &addr), 0);
 
     char* argv[] = { "ip", "route", "show", "192.168.1.42" };

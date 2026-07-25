@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include "dmip.h"
+#include "dmroute.h"
 #include "dmnetif_defs.h"
 
 #ifdef __cplusplus
@@ -35,13 +35,10 @@ extern "C" {
  *
  * dmnetif_set_ip_address() also keeps an interface's directly-connected
  * route in sync by calling dmroute_add()/_remove() directly (see
- * dmnetif.c) - dmnetif depends on dmroute for this, the same ordinary way
- * it depends on dmlist or dmosi, not through a DIF/MAL. IP addresses
- * themselves use dmip_addr_t (see dmip.h) rather than a type of dmnetif's
- * own, since dmroute needs the exact same shape and the two modules must
- * not have a header dependency on each other (dmnetif -> dmroute already
- * goes one way; dmroute -> dmnetif would make it a cycle) - see
- * dmip/docs/dmip.md and dmroute/docs/dmroute.md for the full rationale.
+ * dmnetif.c) - dmnetif depends on dmroute both for this and for the
+ * address type itself: IP addresses use dmroute_addr_t (see dmroute.h),
+ * dmroute's own type, rather than one of dmnetif's own - see
+ * dmroute/docs/dmroute.md for the full rationale.
  */
 
 /**
@@ -281,12 +278,12 @@ dmod_dmnetif_api(1.0, int, _set_mac_address, ( dmnetif_iface_t iface, const dmne
  * @brief Get an interface's currently assigned IP address
  *
  * @param iface Interface handle
- * @param ip    Output buffer. On success, ip->family is dmip_family_none
+ * @param ip    Output buffer. On success, ip->family is dmroute_family_none
  *              if no IP address has been assigned yet
  *
  * @return 0 on success, negative errno on failure (invalid iface or NULL ip)
  */
-dmod_dmnetif_api(1.0, int, _get_ip_address, ( dmnetif_iface_t iface, dmip_addr_t* ip ));
+dmod_dmnetif_api(1.0, int, _get_ip_address, ( dmnetif_iface_t iface, dmroute_addr_t* ip ));
 
 /**
  * @brief Set an interface's IP address
@@ -306,18 +303,18 @@ dmod_dmnetif_api(1.0, int, _get_ip_address, ( dmnetif_iface_t iface, dmip_addr_t
  * update_connected_route() for the details.
  *
  * @param iface Interface handle
- * @param ip    IP address to assign (family must be dmip_family_v4 or
- *              _v6; pass dmip_family_none to clear the assigned address)
+ * @param ip    IP address to assign (family must be dmroute_family_v4 or
+ *              _v6; pass dmroute_family_none to clear the assigned address)
  *
  * @return 0 on success, negative errno on failure (invalid iface, NULL ip,
  *         or an unrecognized family)
  */
-dmod_dmnetif_api(1.0, int, _set_ip_address, ( dmnetif_iface_t iface, const dmip_addr_t* ip ));
+dmod_dmnetif_api(1.0, int, _set_ip_address, ( dmnetif_iface_t iface, const dmroute_addr_t* ip ));
 
 /**
  * @brief Get an interface's currently assigned netmask
  *
- * Reuses dmip_addr_t rather than a dedicated type: a netmask is shaped
+ * Reuses dmroute_addr_t rather than a dedicated type: a netmask is shaped
  * exactly like an address (4 or 16 raw bytes, discriminated by family) -
  * an IPv4 netmask is conventionally written as a dotted-quad value (e.g.
  * "255.255.255.0") for exactly this reason. Feeds directly into the
@@ -328,11 +325,11 @@ dmod_dmnetif_api(1.0, int, _set_ip_address, ( dmnetif_iface_t iface, const dmip_
  *
  * @param iface   Interface handle
  * @param netmask Output buffer. On success, netmask->family is
- *                dmip_family_none if none has been assigned yet
+ *                dmroute_family_none if none has been assigned yet
  *
  * @return 0 on success, negative errno on failure (invalid iface or NULL netmask)
  */
-dmod_dmnetif_api(1.0, int, _get_netmask, ( dmnetif_iface_t iface, dmip_addr_t* netmask ));
+dmod_dmnetif_api(1.0, int, _get_netmask, ( dmnetif_iface_t iface, dmroute_addr_t* netmask ));
 
 /**
  * @brief Set an interface's netmask
@@ -341,27 +338,27 @@ dmod_dmnetif_api(1.0, int, _get_netmask, ( dmnetif_iface_t iface, dmip_addr_t* n
  * ioctl, the driver has no notion of it.
  *
  * @param iface   Interface handle
- * @param netmask Netmask to assign (family must be dmip_family_v4 or _v6;
- *                pass dmip_family_none to clear it)
+ * @param netmask Netmask to assign (family must be dmroute_family_v4 or _v6;
+ *                pass dmroute_family_none to clear it)
  *
  * @return 0 on success, negative errno on failure (invalid iface, NULL
  *         netmask, or an unrecognized family)
  */
-dmod_dmnetif_api(1.0, int, _set_netmask, ( dmnetif_iface_t iface, const dmip_addr_t* netmask ));
+dmod_dmnetif_api(1.0, int, _set_netmask, ( dmnetif_iface_t iface, const dmroute_addr_t* netmask ));
 
 /**
  * @brief Get an interface's currently assigned broadcast address
  *
- * Reuses dmip_addr_t, same as the netmask - a broadcast address is shaped
+ * Reuses dmroute_addr_t, same as the netmask - a broadcast address is shaped
  * exactly like a regular address.
  *
  * @param iface     Interface handle
  * @param broadcast Output buffer. On success, broadcast->family is
- *                  dmip_family_none if none has been assigned yet
+ *                  dmroute_family_none if none has been assigned yet
  *
  * @return 0 on success, negative errno on failure (invalid iface or NULL broadcast)
  */
-dmod_dmnetif_api(1.0, int, _get_broadcast, ( dmnetif_iface_t iface, dmip_addr_t* broadcast ));
+dmod_dmnetif_api(1.0, int, _get_broadcast, ( dmnetif_iface_t iface, dmroute_addr_t* broadcast ));
 
 /**
  * @brief Set an interface's broadcast address
@@ -374,12 +371,12 @@ dmod_dmnetif_api(1.0, int, _get_broadcast, ( dmnetif_iface_t iface, dmip_addr_t*
  *
  * @param iface     Interface handle
  * @param broadcast Broadcast address to assign (family must be
- *                  dmip_family_v4 or _v6; pass dmip_family_none to clear it)
+ *                  dmroute_family_v4 or _v6; pass dmroute_family_none to clear it)
  *
  * @return 0 on success, negative errno on failure (invalid iface, NULL
  *         broadcast, or an unrecognized family)
  */
-dmod_dmnetif_api(1.0, int, _set_broadcast, ( dmnetif_iface_t iface, const dmip_addr_t* broadcast ));
+dmod_dmnetif_api(1.0, int, _set_broadcast, ( dmnetif_iface_t iface, const dmroute_addr_t* broadcast ));
 
 /* ============================================================================
  *                      Frame I/O (bridge to the network stack)

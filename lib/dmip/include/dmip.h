@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "dmroute.h"
+#include "dmnetif.h"
 #include "dmip_defs.h"
 
 #ifdef __cplusplus
@@ -16,20 +18,21 @@ extern "C" {
  *
  * dmip is the IP layer itself: building and parsing IPv4/IPv6 headers,
  * the IPv4 header checksum, TTL/hop-limit handling, identification
- * generation, and fragmentation/reassembly for both families. It also
- * holds dmip_addr_t, the address type shared by every module that speaks
- * IP (dmnetif tracks one per interface, dmroute matches against one per
- * route) - see "Address type" below.
+ * generation, and fragmentation/reassembly for both families. dmip_addr_t
+ * is re-exported from dmroute (see "Address type" below) rather than
+ * defined here.
  *
  * Packets are built/parsed as raw byte buffers rather than packed C
  * structs, same as lib/dmarp/src/dmarp.c and tools/ip/src/ip.c - dmod's
  * minimal module runtime gives no guarantee about struct packing.
  *
- * dmip depends on dmlist (fragment reassembly bookkeeping) and dmosi
- * (mutexes, tick count for reassembly timeouts) - otherwise nothing.
- * There is exactly one reassembly table and one pair of identification
- * counters per system, so every function here is plain Built-in API
- * (dmod_dmip_api), not a DIF/MAL.
+ * dmip depends on dmroute (the address type, and route lookups for its
+ * send path), dmnetif (frame I/O), and dmarp (resolving a destination MAC
+ * before sending), plus dmlist (fragment reassembly bookkeeping) and dmosi
+ * (mutexes, tick count for reassembly timeouts). There is exactly one
+ * reassembly table and one pair of identification counters per system, so
+ * every function here is plain Built-in API (dmod_dmip_api), not a
+ * DIF/MAL.
  */
 
 /* ============================================================================
@@ -37,42 +40,23 @@ extern "C" {
  * ========================================================================== */
 
 /**
- * @brief IP address family - which member of dmip_addr_t's addr union is valid
- */
-typedef enum
-{
-    dmip_family_none = 0,    /**< No address assigned */
-    dmip_family_v4   = 4,    /**< addr.v4 is valid */
-    dmip_family_v6   = 6,    /**< addr.v6 is valid */
-} dmip_family_t;
-
-/**
- * @brief Length in bytes of an IPv4 address
- */
-#define DMIP_IPV4_ADDR_LEN 4
-
-/**
- * @brief Length in bytes of an IPv6 address
- */
-#define DMIP_IPV6_ADDR_LEN 16
-
-/**
- * @brief A single IP address, either IPv4 or IPv6
+ * @brief IP address family / address type - re-exported from dmroute
  *
- * One type covering both families (discriminated by `family`) rather than
- * separate dmip_ipv4_addr_t/dmip_ipv6_addr_t types and parallel _v4/_v6
- * function pairs everywhere an address is used - callers branch on
- * `family` once, not per function.
+ * dmroute owns the real definition (dmroute_family_t/dmroute_addr_t in
+ * dmroute.h) - it's the base of this tree's module graph, with no
+ * dependencies of its own, and dmip depends on it (for route lookups in
+ * dmip_v4_send()) - so dmroute defining the address type rather than dmip
+ * is what keeps the graph a DAG instead of a cycle. These aliases exist so
+ * every existing dmip.h consumer (starting with dmip.c itself) keeps
+ * working under the dmip_* names unchanged - see docs/dmip.md.
  */
-typedef struct
-{
-    dmip_family_t family;
-    union
-    {
-        uint8_t v4[DMIP_IPV4_ADDR_LEN];
-        uint8_t v6[DMIP_IPV6_ADDR_LEN];
-    } addr;
-} dmip_addr_t;
+typedef dmroute_family_t dmip_family_t;
+#define dmip_family_none dmroute_family_none
+#define dmip_family_v4   dmroute_family_v4
+#define dmip_family_v6   dmroute_family_v6
+#define DMIP_IPV4_ADDR_LEN DMROUTE_IPV4_ADDR_LEN
+#define DMIP_IPV6_ADDR_LEN DMROUTE_IPV6_ADDR_LEN
+typedef dmroute_addr_t dmip_addr_t;
 
 /* ============================================================================
  *                      Protocol numbers
@@ -349,6 +333,82 @@ dmod_dmip_api(1.0, int, _v4_fragment, ( const dmip_v4_header_t* header, const vo
  */
 dmod_dmip_api(1.0, int, _v4_reassemble, ( const uint8_t* fragment, size_t length, uint8_t** out_packet, size_t* out_length ));
 
+/**
+ * @brief Find the source address dmip_v4_send() would use to reach `dst`
+ *
+ * Looks up the egress route for `dst` (dmroute_lookup()) and reads the
+ * resulting interface's own IP address (dmnetif_get_ip_address()).
+ * dmip_v4_send() calls this internally whenever its header template
+ * leaves `src` unset; exposed publicly since a caller building a packet
+ * *on top of* dmip (e.g. computing a UDP checksum, which needs the source
+ * address before the segment can be assembled) needs the same answer
+ * before it can call dmip_v4_send() at all.
+ *
+ * @param dst     Destination address (family must be dmip_family_v4)
+ * @param out_src Output: the source address to use. `family` is
+ *                dmip_family_none if the egress interface has none
+ *                assigned yet - not treated as an error, mirroring
+ *                dmnetif_get_ip_address()'s own contract
+ *
+ * @return 0 on success, -EINVAL (bad argument/family), -ENETUNREACH (no
+ *         route to `dst`), -ENODEV (the route's interface is no longer
+ *         registered)
+ */
+dmod_dmip_api(1.0, int, _v4_get_source_address, ( const dmip_addr_t* dst, dmip_addr_t* out_src ));
+
+/**
+ * @brief Build and transmit an IPv4 packet
+ *
+ * Looks up the egress interface and next hop for `header->dst`
+ * (dmroute_lookup()), resolves the next hop's MAC address
+ * (dmarp_resolve(), given `arp_timeout_ms`), fills in `header->src` via
+ * dmip_v4_get_source_address() if left `dmip_family_none`, and - after
+ * reading the egress interface's MTU - fragments and transmits the packet
+ * through dmnetif_send() (dmip_v4_fragment() under the hood, so a payload
+ * that doesn't fit in one MTU-sized packet is split the same way
+ * dmip_v4_fragment() documents).
+ *
+ * @param header        Template header - dst/protocol/ttl/dscp/ecn/
+ *                        flag_df/identification, same as
+ *                        dmip_v4_fragment(). `dst` must have family
+ *                        dmip_family_v4
+ * @param payload       Data to send
+ * @param payload_len   Length of `payload` in bytes
+ * @param arp_timeout_ms Forwarded to dmarp_resolve() for a cache miss -
+ *                        use DMARP_DEFAULT_TIMEOUT_MS if you don't have a
+ *                        strong opinion
+ *
+ * @return 0 on success, -EINVAL (bad argument/family), -ENETUNREACH (no
+ *         route to `header->dst`), -ENODEV (the route's interface is no
+ *         longer registered), -EHOSTUNREACH (ARP resolution failed or
+ *         timed out), -EMSGSIZE/-ENOMEM (see dmip_v4_fragment()), -EIO (a
+ *         fragment's dmnetif_send() failed - fragments already sent
+ *         before the failure remain on the wire, there is no way to
+ *         recall them, same as any real link)
+ */
+dmod_dmip_api(1.0, int, _v4_send, ( const dmip_v4_header_t* header, const void* payload, size_t payload_len, uint32_t arp_timeout_ms ));
+
+/**
+ * @brief Receive one IPv4 packet on `iface`, if one is available
+ *
+ * One non-blocking dmnetif_receive() call: checks the Ethernet ethertype
+ * is IPv4, strips the 14-byte L2 header, and feeds the rest through
+ * dmip_v4_reassemble() - see that function for the fragmentation-handling
+ * contract this inherits.
+ *
+ * @param iface      Interface to poll
+ * @param out_packet Output: on 0, a heap-allocated complete wire-format
+ *                    IPv4 packet - see dmip_v4_reassemble(). Owned by the
+ *                    caller - release with Dmod_Free() when done
+ * @param out_length Output: length of `*out_packet` in bytes
+ *
+ * @return 0 if a packet completed, -EAGAIN if no frame was currently
+ *         pending on `iface`, -EPROTO if a frame was pending but wasn't an
+ *         IPv4 frame, otherwise dmip_v4_reassemble()'s own
+ *         -EINPROGRESS/-EINVAL/-EPROTO/-ENOMEM
+ */
+dmod_dmip_api(1.0, int, _v4_receive, ( dmnetif_iface_t iface, uint8_t** out_packet, size_t* out_length ));
+
 /* ============================================================================
  *                      IPv6
  * ========================================================================== */
@@ -496,6 +556,114 @@ dmod_dmip_api(1.0, int, _v6_fragment, ( const dmip_v6_header_t* header, const vo
  *         allocation failed
  */
 dmod_dmip_api(1.0, int, _v6_reassemble, ( const uint8_t* fragment, size_t length, uint8_t** out_packet, size_t* out_length ));
+
+/**
+ * @brief Receive one IPv6 packet on `iface`, if one is available
+ *
+ * IPv6's equivalent of dmip_v4_receive(): one non-blocking
+ * dmnetif_receive() call, checks the Ethernet ethertype is IPv6, strips
+ * the 14-byte L2 header, feeds the rest through dmip_v6_reassemble().
+ *
+ * There is no dmip_v6_send(): building the Ethernet frame requires a
+ * destination MAC, which for IPv4 comes from dmarp (ARP) - IPv6 resolves
+ * that via NDP (RFC 4861) instead, and there is no NDP module in this
+ * tree yet (the same boundary dmarp.h documents for itself). Once one
+ * exists, dmip_v6_send() can be added following the exact shape of
+ * dmip_v4_send().
+ *
+ * @param iface      Interface to poll
+ * @param out_packet Output: on 0, a heap-allocated complete wire-format
+ *                    IPv6 packet - see dmip_v6_reassemble(). Owned by the
+ *                    caller - release with Dmod_Free() when done
+ * @param out_length Output: length of `*out_packet` in bytes
+ *
+ * @return 0 if a packet completed, -EAGAIN if no frame was currently
+ *         pending on `iface`, -EPROTO if a frame was pending but wasn't an
+ *         IPv6 frame, otherwise dmip_v6_reassemble()'s own
+ *         -EINPROGRESS/-EINVAL/-EPROTO/-ENOMEM
+ */
+dmod_dmip_api(1.0, int, _v6_receive, ( dmnetif_iface_t iface, uint8_t** out_packet, size_t* out_length ));
+
+/* ============================================================================
+ *                      Family-agnostic entry points
+ * ========================================================================== */
+
+/**
+ * @brief Family-tagged union of dmip_v4_header_t/dmip_v6_header_t
+ *
+ * `family` must agree with whichever member of `header` is populated (and
+ * with that member's own `dst.family`) - it's needed at all only because
+ * the two header structs don't share a common initial sequence (different
+ * fields precede `dst` in each), so there's no safe way to tell them
+ * apart without an explicit tag, the same reason dmip_addr_t itself
+ * carries one. You set it once, here - dmip_send() is what then decides
+ * whether to call dmip_v4_send() or (once it exists) dmip_v6_send(), not
+ * the caller.
+ */
+typedef struct
+{
+    dmip_family_t family;
+    union
+    {
+        dmip_v4_header_t v4;    /**< Valid when family == dmip_family_v4 */
+        dmip_v6_header_t v6;    /**< Valid when family == dmip_family_v6 */
+    } header;
+} dmip_header_t;
+
+/**
+ * @brief Build and transmit an IP packet of whichever family
+ *        `header->family` says
+ *
+ * A thin dispatcher over dmip_v4_send()/dmip_v6_send() - exists so a
+ * caller doesn't separately have to decide *which function to call* on
+ * top of already having put the family in the address fields; see
+ * dmip_header_t's own doc comment.
+ *
+ * @param header         `family` selects `header->header.v4` or `.v6`;
+ *                        otherwise identical to the corresponding
+ *                        dmip_v4_send()/dmip_v6_send() `header` argument
+ * @param payload        Data to send
+ * @param payload_len    Length of `payload` in bytes
+ * @param arp_timeout_ms Forwarded to dmip_v4_send() (which forwards it to
+ *                        dmarp_resolve()) - ignored for `dmip_family_v6`,
+ *                        which has no ARP step
+ *
+ * @return dmip_v4_send()'s own return value for `dmip_family_v4`;
+ *         `-ENOSYS` for `dmip_family_v6` (no dmip_v6_send() yet - see
+ *         dmip_v6_receive()'s doc comment for why); `-EINVAL` if `header`
+ *         is NULL or `header->family` is neither
+ */
+dmod_dmip_api(1.0, int, _send, ( const dmip_header_t* header, const void* payload, size_t payload_len, uint32_t arp_timeout_ms ));
+
+/**
+ * @brief Receive one IP packet of either family on `iface`, if one is available
+ *
+ * Not the same as calling dmip_v4_receive() and dmip_v6_receive() back to
+ * back: each of those makes its own dmnetif_receive() call, so polling
+ * both would consume two frames per cycle and - since dmnetif_receive()
+ * hands back whichever frame happens to be pending regardless of its
+ * ethertype - risk silently dropping a v6 frame consumed (and rejected
+ * with -EPROTO) by dmip_v4_receive(), or vice versa. This makes exactly
+ * one dmnetif_receive() call, checks the ethertype once, and dispatches
+ * to dmip_v4_reassemble()/dmip_v6_reassemble() accordingly - no frame is
+ * ever at risk of being consumed by the "wrong" family's call.
+ *
+ * @param iface      Interface to poll
+ * @param out_family Output: dmip_family_v4 or _v6, whichever the arrived
+ *                    frame was - only meaningful when this returns 0 or
+ *                    the underlying reassembly's own -EINPROGRESS
+ * @param out_packet Output: on 0, a heap-allocated complete wire-format
+ *                    packet of the family in `*out_family` - see
+ *                    dmip_v4_receive()/_v6_receive(). Owned by the
+ *                    caller - release with Dmod_Free() when done
+ * @param out_length Output: length of `*out_packet` in bytes
+ *
+ * @return 0 if a packet completed, -EAGAIN if no frame was pending,
+ *         -EPROTO if a frame was pending but was neither IPv4 nor IPv6,
+ *         otherwise the underlying dmip_v4_reassemble()'s/
+ *         _v6_reassemble()'s own -EINPROGRESS/-EINVAL/-EPROTO/-ENOMEM
+ */
+dmod_dmip_api(1.0, int, _receive, ( dmnetif_iface_t iface, dmip_family_t* out_family, uint8_t** out_packet, size_t* out_length ));
 
 #ifdef __cplusplus
 }

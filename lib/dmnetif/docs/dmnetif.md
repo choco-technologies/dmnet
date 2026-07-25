@@ -84,12 +84,13 @@ route in [dmroute](../../dmroute) in sync, by calling `dmroute_add()`/
 dmnetif depends on dmroute for this the same ordinary way it depends on
 `dmlist` or `dmosi` - not through a DIF/MAL - since a routing table is
 always wanted alongside an interface registry, not an optional/pluggable
-extra. IP addresses themselves use `dmip_addr_t` (see
-[dmip](../../dmip)) rather than a type of dmnetif's own, since dmroute
-needs the exact same shape and the two modules must not depend on each
-other's headers (dmnetif -> dmroute already goes one way; dmroute ->
-dmnetif would make it a cycle). See `dmroute/docs/dmroute.md`'s
-"Automatic registration" section for what dmroute does with each call.
+extra. IP addresses themselves use `dmroute_addr_t` (see
+[dmroute](../../dmroute)) rather than a type of dmnetif's own - dmroute
+owns the address type outright (it has no dependencies of its own to keep
+that way), so dmnetif borrowing it rather than defining a parallel copy
+costs nothing and keeps the two representations from ever drifting apart.
+See `dmroute/docs/dmroute.md`'s "Automatic registration" section for what
+dmroute does with each call.
 
 ## MTU
 
@@ -132,11 +133,10 @@ one intentionally does not.
 
 ## Dependencies
 
-- `dmip` - the shared `dmip_addr_t` type used for every IP address/
-  netmask/broadcast field
-- `dmroute` - `dmnetif_set_ip_address()` calls `dmroute_add()`/`_remove()`
-  directly to keep an interface's connected route in sync (see the "IP
-  address" section above)
+- `dmroute` - `dmroute_addr_t`, the type used for every IP address/
+  netmask/broadcast field, plus `dmnetif_set_ip_address()` calling
+  `dmroute_add()`/`_remove()` directly to keep an interface's connected
+  route in sync (see the "IP address" section above)
 - `dmdrvi` - generic driver interface (open/close/read/write/ioctl,
   `DMDRVI_IOCTL_NET_*` commands) used internally to talk to the device
   a driver registered

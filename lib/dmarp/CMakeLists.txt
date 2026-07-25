@@ -31,19 +31,19 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# dmip:    dmip_addr_t, the address type dmarp resolves
+# dmroute: dmroute_addr_t, the address type dmarp resolves
 # dmnetif: dmarp sends/receives raw ARP frames through dmnetif_send()/
 #          _receive() on a specific interface, and reads that interface's
 #          own MAC/IP address to build a request - see src/dmarp.c.
-#          Nothing depends on dmarp in turn, so this is a plain one-way
-#          dependency, not a DIF/MAL.
-# Both are in-tree siblings (lib/dmip, lib/dmnetif - added earlier via the
-# top-level add_subdirectory(lib) - see dmnet/CMakeLists.txt), not
+#          dmip depends on dmarp in turn (to resolve a destination MAC
+#          before sending), not the other way around.
+# Both are in-tree siblings (lib/dmroute, lib/dmnetif - added earlier via
+# the top-level add_subdirectory(lib) - see dmnet/CMakeLists.txt), not
 # separately published modules, so they're linked directly rather than
 # through dmod_link_modules() (which fetches a *released* module's headers
 # via dmf-get and would fail here since neither has such a release) - same
 # convention tools/ifconfig/CMakeLists.txt uses for dmnetif.
-target_link_libraries(${DMOD_MODULE_NAME} dmip_if dmnetif_if)
+target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if)
 
 # dmlist: backs the ARP cache
 # dmosi:  mutex guarding the cache, plus dmosi_get_tick_count()/

@@ -12,5 +12,5 @@ dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
 # dependency here. It's invoked on demand through Dmod_RunModule() (see
 # ifconfig_test.c), which loads/runs/unloads it per call instead of holding
 # it resident for the whole test run.
-# dmip: dmip_addr_t, used directly to build test addresses.
-target_link_libraries(${DMOD_MODULE_NAME} dmnetif_if dmip_if)
+# dmroute_addr_t (from dmroute_if) is used directly to build test addresses.
+target_link_libraries(${DMOD_MODULE_NAME} dmnetif_if dmroute_if)

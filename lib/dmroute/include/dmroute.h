@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include "dmip.h"
 #include "dmroute_defs.h"
 
 #ifdef __cplusplus
@@ -21,27 +20,71 @@ extern "C" {
  * an optional gateway and a metric used to break ties between otherwise
  * equally-specific matches.
  *
- * dmroute depends only on dmip (for dmip_addr_t) - never on dmnetif or any
- * other module. This is the opposite direction from what "routing sits on
- * top of the interface manager" might suggest: dmnetif is the one that
- * depends on and calls *this* module (dmnetif_set_ip_address() calls
- * dmroute_add()/_remove() directly to keep an interface's
- * directly-connected route in sync - see lib/dmnetif/src/dmnetif.c), not
- * the other way around. Keeping dmroute itself free of any dependency
- * back on dmnetif is what makes that possible without a build cycle - see
- * docs/dmroute.md for the full rationale, including why this is a plain,
- * always-connected dependency like any other (dmip, dmlist, dmosi, ...)
- * rather than an optional/pluggable DIF or MAL connection: dmnetif always
- * needs a routing table.
+ * dmroute has no dependencies at all - it is the base of this tree's
+ * module graph. It owns dmroute_addr_t (the address type used throughout:
+ * dmnetif tracks one per interface, dmarp resolves one to a MAC, dmip
+ * builds packets addressed with one) precisely so it doesn't have to
+ * depend on anything else for it - dmip needs dmroute (to pick an egress
+ * interface when sending), so dmroute depending back on dmip for a type
+ * would make the graph a cycle. See docs/dmroute.md for the full
+ * rationale, including why dmnetif depending on *this* module (not the
+ * other way around - dmnetif_set_ip_address() calls dmroute_add()/
+ * _remove() directly to keep an interface's directly-connected route in
+ * sync, see lib/dmnetif/src/dmnetif.c) is still a plain, always-connected
+ * dependency like any other rather than an optional/pluggable DIF or MAL
+ * connection: dmnetif always needs a routing table.
  *
  * dmroute never sends or receives a frame itself - it only answers "which
  * interface (and gateway, if any) should this destination go through" for
- * whatever runs above it (a TCP/IP stack, the `ip` CLI) to act on.
+ * whatever runs above it (dmip's send path, the `ip` CLI) to act on.
  *
  * There is exactly one routing table per system - functions here are
  * plain Built-in API (dmod_dmroute_api), not a DIF/MAL, since there is
  * only ever one table to call into.
  */
+
+/* ============================================================================
+ *                      Address type
+ * ========================================================================== */
+
+/**
+ * @brief IP address family - which member of dmroute_addr_t's addr union
+ *        is valid
+ */
+typedef enum
+{
+    dmroute_family_none = 0,    /**< No address assigned */
+    dmroute_family_v4   = 4,    /**< addr.v4 is valid */
+    dmroute_family_v6   = 6,    /**< addr.v6 is valid */
+} dmroute_family_t;
+
+/**
+ * @brief Length in bytes of an IPv4 address
+ */
+#define DMROUTE_IPV4_ADDR_LEN 4
+
+/**
+ * @brief Length in bytes of an IPv6 address
+ */
+#define DMROUTE_IPV6_ADDR_LEN 16
+
+/**
+ * @brief A single IP address, either IPv4 or IPv6
+ *
+ * One type covering both families (discriminated by `family`) rather than
+ * separate dmroute_ipv4_addr_t/dmroute_ipv6_addr_t types and parallel
+ * _v4/_v6 function pairs everywhere an address is used - callers branch on
+ * `family` once, not per function.
+ */
+typedef struct
+{
+    dmroute_family_t family;
+    union
+    {
+        uint8_t v4[DMROUTE_IPV4_ADDR_LEN];
+        uint8_t v6[DMROUTE_IPV6_ADDR_LEN];
+    } addr;
+} dmroute_addr_t;
 
 /**
  * @brief Opaque handle to one routing table entry
@@ -94,11 +137,11 @@ typedef enum
  * that themselves before calling this.
  *
  * @param destination  Destination network address (family must be
- *                      dmip_family_v4 or _v6)
+ *                      dmroute_family_v4 or _v6)
  * @param netmask      Netmask for the destination network (same family as
  *                      destination)
  * @param gateway      Next-hop gateway address, or NULL (or family
- *                      dmip_family_none) for a directly-connected/on-link
+ *                      dmroute_family_none) for a directly-connected/on-link
  *                      route with no gateway. If given, family must match
  *                      destination.
  * @param iface_name   Name of the interface to route matching traffic
@@ -117,7 +160,7 @@ typedef enum
  * @return Handle to the new route, or NULL on failure (invalid/mismatched
  *         families or out of memory)
  */
-dmod_dmroute_api(1.0, dmroute_route_t, _add, ( const dmip_addr_t* destination, const dmip_addr_t* netmask, const dmip_addr_t* gateway, const char* iface_name, uint32_t metric, dmroute_origin_t origin ));
+dmod_dmroute_api(1.0, dmroute_route_t, _add, ( const dmroute_addr_t* destination, const dmroute_addr_t* netmask, const dmroute_addr_t* gateway, const char* iface_name, uint32_t metric, dmroute_origin_t origin ));
 
 /**
  * @brief Remove a route from the table
@@ -140,13 +183,13 @@ dmod_dmroute_api(1.0, void, _remove, ( dmroute_route_t route ));
  * netmask bits set wins; ties are broken by the lowest metric, then by
  * whichever route was added first.
  *
- * @param destination_ip Address to look up (family must be dmip_family_v4
- *                        or _v6)
+ * @param destination_ip Address to look up (family must be
+ *                        dmroute_family_v4 or _v6)
  *
  * @return The best-matching route, or NULL if no route matches (no
  *         default route present)
  */
-dmod_dmroute_api(1.0, dmroute_route_t, _lookup, ( const dmip_addr_t* destination_ip ));
+dmod_dmroute_api(1.0, dmroute_route_t, _lookup, ( const dmroute_addr_t* destination_ip ));
 
 /**
  * @brief Number of routes currently in the table
@@ -193,7 +236,7 @@ dmod_dmroute_api(1.0, void, _for_each, ( dmroute_iterator_func_t callback, void*
  *
  * @return 0 on success, negative errno on failure (invalid route or NULL destination)
  */
-dmod_dmroute_api(1.0, int, _get_destination, ( dmroute_route_t route, dmip_addr_t* destination ));
+dmod_dmroute_api(1.0, int, _get_destination, ( dmroute_route_t route, dmroute_addr_t* destination ));
 
 /**
  * @brief Get a route's netmask
@@ -203,19 +246,19 @@ dmod_dmroute_api(1.0, int, _get_destination, ( dmroute_route_t route, dmip_addr_
  *
  * @return 0 on success, negative errno on failure (invalid route or NULL netmask)
  */
-dmod_dmroute_api(1.0, int, _get_netmask, ( dmroute_route_t route, dmip_addr_t* netmask ));
+dmod_dmroute_api(1.0, int, _get_netmask, ( dmroute_route_t route, dmroute_addr_t* netmask ));
 
 /**
  * @brief Get a route's gateway
  *
  * @param route   Route handle
  * @param gateway Output buffer. On success, gateway->family is
- *                dmip_family_none for a directly-connected/on-link route
- *                with no gateway.
+ *                dmroute_family_none for a directly-connected/on-link
+ *                route with no gateway.
  *
  * @return 0 on success, negative errno on failure (invalid route or NULL gateway)
  */
-dmod_dmroute_api(1.0, int, _get_gateway, ( dmroute_route_t route, dmip_addr_t* gateway ));
+dmod_dmroute_api(1.0, int, _get_gateway, ( dmroute_route_t route, dmroute_addr_t* gateway ));
 
 /**
  * @brief Get the name of the interface a route sends matching traffic through

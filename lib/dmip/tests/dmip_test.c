@@ -5,20 +5,32 @@
  * Covers the address type (family enum / union shape - relied on by
  * dmnetif's and dmroute's own field-by-field conversions), the RFC 1071
  * checksum primitive, IPv4/IPv6 header build/parse round trips, TTL/
- * Hop-Limit decrement, identification counters, and fragmentation/
- * reassembly for both families (including out-of-order fragment
- * delivery and the "already whole" passthrough path).
+ * Hop-Limit decrement, identification counters, fragmentation/reassembly
+ * for both families (including out-of-order fragment delivery and the
+ * "already whole" passthrough path), and send/receive.
  *
- * No dmod_test_setup()/_teardown() fixture is needed: fragmentation
- * tests draw a fresh identification from dmip_v4_next_identification()/
- * dmip_v6_next_identification() (monotonic, so never collides with an
- * earlier test's in-progress reassembly), and every other test either
- * doesn't touch the reassembly table at all (build/parse, TTL, the
- * single-packet fragment/passthrough cases) or completes it within the
- * same step.
+ * The send/receive steps register two "/null"-backed dmnetif fixture
+ * interfaces (same pattern as lib/dmarp/tests/dmarp_test.c) via
+ * dmod_test_setup()/_teardown(), wrapping every step in this file
+ * regardless of whether that particular step uses them. No real driver
+ * backs either fixture, so neither can ever actually go "up" - a full
+ * dmip_v4_send() transmission can't be exercised end-to-end here, but
+ * everything up to the point a real driver would be needed can: route
+ * lookup (dmroute), a cache-hit ARP resolution (dmarp, seeded by hand -
+ * the same "no real driver" limitation dmarp_test.c documents for its own
+ * cache-miss path applies here too), fragmentation, and Ethernet framing,
+ * failing only at the final dmnetif_send() (-EIO, interface not up).
+ *
+ * Every send/receive step uses a distinct destination network (never
+ * reused across steps), since dmroute's routes and dmarp's cache are
+ * both global state that outlives a single test step - same discipline
+ * dmarp_test.c documents for its own cache entries.
  */
 #include "dmod_test.h"
 #include "dmip.h"
+#include "dmroute.h"
+#include "dmnetif.h"
+#include "dmarp.h"
 #include <string.h>
 #include <errno.h>
 
@@ -76,6 +88,26 @@ static void collect_fragment(const uint8_t* fragment, size_t fragment_len, void*
     memcpy(collector->data[collector->count], fragment, fragment_len);
     collector->length[collector->count] = fragment_len;
     collector->count++;
+}
+
+#define TEST_DEVICE_PATH_0 "/null"
+#define TEST_DEVICE_PATH_1 "/null2"
+
+static dmnetif_iface_t g_iface0 = NULL;
+static dmnetif_iface_t g_iface1 = NULL;
+
+void dmod_test_setup(void)
+{
+    g_iface0 = dmnetif_register("test0", TEST_DEVICE_PATH_0);
+    g_iface1 = dmnetif_register("test1", TEST_DEVICE_PATH_1);
+}
+
+void dmod_test_teardown(void)
+{
+    dmnetif_unregister(g_iface0);
+    dmnetif_unregister(g_iface1);
+    g_iface0 = NULL;
+    g_iface1 = NULL;
 }
 
 /* ---- Address type ---- */
@@ -663,4 +695,223 @@ DMOD_TEST_STEP(v6_reassemble_invalid_packet_returns_error)
     uint8_t* out = NULL;
     size_t out_len = 0;
     DMOD_TEST_EXPECT_EQ(dmip_v6_reassemble(garbage, sizeof(garbage), &out, &out_len), -EINVAL);
+}
+
+/* ---- IPv4: get_source_address ---- */
+
+DMOD_TEST_STEP(v4_get_source_address_returns_egress_interface_ip)
+{
+    dmip_addr_t iface_ip = make_v4(10, 10, 0, 1);
+    dmnetif_set_ip_address(g_iface0, &iface_ip);
+
+    dmip_addr_t dest_net = make_v4(10, 10, 0, 0);
+    dmip_addr_t netmask = make_v4(255, 255, 255, 0);
+    dmroute_route_t route = dmroute_add(&dest_net, &netmask, NULL, "test0", DMROUTE_DEFAULT_METRIC, dmroute_origin_static);
+
+    dmip_addr_t target = make_v4(10, 10, 0, 42);
+    dmip_addr_t src = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmip_v4_get_source_address(&target, &src), 0);
+    DMOD_TEST_EXPECT_EQ(src.family, dmip_family_v4);
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(src.addr.v4, iface_ip.addr.v4, DMIP_IPV4_ADDR_LEN));
+
+    dmroute_remove(route);
+    dmip_addr_t clear = { 0 };
+    dmnetif_set_ip_address(g_iface0, &clear);
+}
+
+DMOD_TEST_STEP(v4_get_source_address_no_route_returns_enetunreach)
+{
+    dmip_addr_t target = make_v4(192, 0, 2, 200); /* TEST-NET-1 - no route added anywhere in this file */
+    dmip_addr_t src = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmip_v4_get_source_address(&target, &src), -ENETUNREACH);
+}
+
+DMOD_TEST_STEP(v4_get_source_address_rejects_bad_arguments)
+{
+    dmip_addr_t target = make_v4(10, 0, 0, 1);
+    dmip_addr_t src = { 0 };
+
+    DMOD_TEST_EXPECT_EQ(dmip_v4_get_source_address(NULL, &src), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_v4_get_source_address(&target, NULL), -EINVAL);
+
+    dmip_addr_t bad_family = target;
+    bad_family.family = dmip_family_v6;
+    DMOD_TEST_EXPECT_EQ(dmip_v4_get_source_address(&bad_family, &src), -EINVAL);
+}
+
+/* ---- IPv4: send ---- */
+
+DMOD_TEST_STEP(v4_send_rejects_bad_arguments)
+{
+    dmip_v4_header_t header = { 0 };
+    header.dst = make_v4(10, 0, 0, 1);
+
+    DMOD_TEST_EXPECT_EQ(dmip_v4_send(NULL, NULL, 0, DMARP_DEFAULT_TIMEOUT_MS), -EINVAL);
+
+    dmip_v4_header_t bad_family = header;
+    bad_family.dst.family = dmip_family_v6;
+    DMOD_TEST_EXPECT_EQ(dmip_v4_send(&bad_family, NULL, 0, DMARP_DEFAULT_TIMEOUT_MS), -EINVAL);
+}
+
+DMOD_TEST_STEP(v4_send_no_route_returns_enetunreach)
+{
+    dmip_v4_header_t header = { 0 };
+    header.dst = make_v4(203, 0, 113, 1); /* TEST-NET-3 - no route added anywhere in this file */
+    header.protocol = DMIP_PROTO_UDP;
+
+    DMOD_TEST_EXPECT_EQ(dmip_v4_send(&header, NULL, 0, DMARP_DEFAULT_TIMEOUT_MS), -ENETUNREACH);
+}
+
+DMOD_TEST_STEP(v4_send_route_to_unregistered_iface_returns_enodev)
+{
+    dmip_addr_t dest_net = make_v4(198, 51, 100, 0);
+    dmip_addr_t netmask = make_v4(255, 255, 255, 0);
+    dmroute_route_t route = dmroute_add(&dest_net, &netmask, NULL, "does-not-exist", DMROUTE_DEFAULT_METRIC, dmroute_origin_static);
+
+    dmip_v4_header_t header = { 0 };
+    header.dst = make_v4(198, 51, 100, 5);
+    header.protocol = DMIP_PROTO_UDP;
+
+    DMOD_TEST_EXPECT_EQ(dmip_v4_send(&header, NULL, 0, DMARP_DEFAULT_TIMEOUT_MS), -ENODEV);
+
+    dmroute_remove(route);
+}
+
+DMOD_TEST_STEP(v4_send_full_path_without_real_driver_returns_eio)
+{
+    /* Route + a hand-seeded ARP cache entry let dmip_v4_send() run its
+     * entire pipeline (route lookup, ARP cache hit, fragmentation,
+     * Ethernet framing) without needing a real driver - it only fails at
+     * the very last step, dmnetif_send() against an interface that could
+     * never be brought up (no real driver behind "/null"). */
+    dmip_addr_t dest_net = make_v4(172, 16, 5, 0);
+    dmip_addr_t netmask = make_v4(255, 255, 255, 0);
+    dmroute_route_t route = dmroute_add(&dest_net, &netmask, NULL, "test0", DMROUTE_DEFAULT_METRIC, dmroute_origin_static);
+
+    dmip_addr_t dest = make_v4(172, 16, 5, 10);
+    dmnetif_mac_addr_t fake_mac = { { 0x02, 0x00, 0x00, 0x00, 0x00, 0x10 } };
+    dmarp_cache_insert(g_iface0, &dest, &fake_mac);
+
+    dmip_v4_header_t header = { 0 };
+    header.dst = dest;
+    header.protocol = DMIP_PROTO_UDP;
+    header.ttl = DMIP_DEFAULT_TTL;
+    header.identification = dmip_v4_next_identification();
+
+    uint8_t payload[4] = { 1, 2, 3, 4 };
+    DMOD_TEST_EXPECT_EQ(dmip_v4_send(&header, payload, sizeof(payload), DMARP_DEFAULT_TIMEOUT_MS), -EIO);
+
+    dmarp_cache_remove(g_iface0, &dest);
+    dmroute_remove(route);
+}
+
+/* ---- IPv4 / IPv6: receive ---- */
+
+DMOD_TEST_STEP(v4_receive_rejects_bad_arguments)
+{
+    uint8_t* out = NULL;
+    size_t out_len = 0;
+
+    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(NULL, &out, &out_len), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(g_iface0, NULL, &out_len), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(g_iface0, &out, NULL), -EINVAL);
+}
+
+DMOD_TEST_STEP(v4_receive_no_pending_frame_returns_eagain)
+{
+    /* No real driver means dmnetif_receive() always reports "nothing
+     * pending" - the same reasoning dmarp_test.c relies on for its own
+     * cache-miss-without-driver step. */
+    uint8_t* out = NULL;
+    size_t out_len = 0;
+    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(g_iface0, &out, &out_len), -EAGAIN);
+}
+
+DMOD_TEST_STEP(v6_receive_rejects_bad_arguments)
+{
+    uint8_t* out = NULL;
+    size_t out_len = 0;
+
+    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(NULL, &out, &out_len), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(g_iface0, NULL, &out_len), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(g_iface0, &out, NULL), -EINVAL);
+}
+
+DMOD_TEST_STEP(v6_receive_no_pending_frame_returns_eagain)
+{
+    uint8_t* out = NULL;
+    size_t out_len = 0;
+    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(g_iface0, &out, &out_len), -EAGAIN);
+}
+
+/* ---- Family-agnostic: send/receive dispatch ---- */
+
+DMOD_TEST_STEP(send_rejects_null_header)
+{
+    DMOD_TEST_EXPECT_EQ(dmip_send(NULL, NULL, 0, DMARP_DEFAULT_TIMEOUT_MS), -EINVAL);
+}
+
+DMOD_TEST_STEP(send_unrecognized_family_returns_einval)
+{
+    dmip_header_t header = { 0 };
+    header.family = (dmip_family_t)7;
+    DMOD_TEST_EXPECT_EQ(dmip_send(&header, NULL, 0, DMARP_DEFAULT_TIMEOUT_MS), -EINVAL);
+}
+
+DMOD_TEST_STEP(send_v6_family_returns_enosys)
+{
+    /* No dmip_v6_send() yet (no NDP module to resolve a next-hop MAC
+     * through) - dmip_send() reports that honestly rather than pretending
+     * to have sent anything. */
+    dmip_header_t header = { 0 };
+    header.family = dmip_family_v6;
+    header.header.v6.dst = make_v6(1);
+    DMOD_TEST_EXPECT_EQ(dmip_send(&header, NULL, 0, DMARP_DEFAULT_TIMEOUT_MS), -ENOSYS);
+}
+
+DMOD_TEST_STEP(send_v4_family_dispatches_to_v4_send)
+{
+    /* Same setup as v4_send_full_path_without_real_driver_returns_eio -
+     * dmip_send() should reach the exact same -EIO by dispatching to
+     * dmip_v4_send() under the hood, not by reimplementing any of it. */
+    dmip_addr_t dest_net = make_v4(172, 16, 6, 0);
+    dmip_addr_t netmask = make_v4(255, 255, 255, 0);
+    dmroute_route_t route = dmroute_add(&dest_net, &netmask, NULL, "test0", DMROUTE_DEFAULT_METRIC, dmroute_origin_static);
+
+    dmip_addr_t dest = make_v4(172, 16, 6, 10);
+    dmnetif_mac_addr_t fake_mac = { { 0x02, 0x00, 0x00, 0x00, 0x00, 0x11 } };
+    dmarp_cache_insert(g_iface0, &dest, &fake_mac);
+
+    dmip_header_t header = { 0 };
+    header.family = dmip_family_v4;
+    header.header.v4.dst = dest;
+    header.header.v4.protocol = DMIP_PROTO_UDP;
+    header.header.v4.ttl = DMIP_DEFAULT_TTL;
+    header.header.v4.identification = dmip_v4_next_identification();
+
+    uint8_t payload[4] = { 5, 6, 7, 8 };
+    DMOD_TEST_EXPECT_EQ(dmip_send(&header, payload, sizeof(payload), DMARP_DEFAULT_TIMEOUT_MS), -EIO);
+
+    dmarp_cache_remove(g_iface0, &dest);
+    dmroute_remove(route);
+}
+
+DMOD_TEST_STEP(receive_rejects_bad_arguments)
+{
+    dmip_family_t family = dmip_family_none;
+    uint8_t* out = NULL;
+    size_t out_len = 0;
+
+    DMOD_TEST_EXPECT_EQ(dmip_receive(NULL, &family, &out, &out_len), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_receive(g_iface0, NULL, &out, &out_len), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_receive(g_iface0, &family, NULL, &out_len), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_receive(g_iface0, &family, &out, NULL), -EINVAL);
+}
+
+DMOD_TEST_STEP(receive_no_pending_frame_returns_eagain)
+{
+    dmip_family_t family = dmip_family_none;
+    uint8_t* out = NULL;
+    size_t out_len = 0;
+    DMOD_TEST_EXPECT_EQ(dmip_receive(g_iface0, &family, &out, &out_len), -EAGAIN);
 }

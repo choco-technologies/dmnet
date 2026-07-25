@@ -2,7 +2,7 @@
  * @file dmip.c
  * @brief DMOD IP protocol - Implementation
  *
- * Three loosely-coupled pieces live here:
+ * Four loosely-coupled pieces live here:
  *
  *  - The RFC 1071 checksum primitive (dmip_checksum()), used by the IPv4
  *    header build/verify/TTL-decrement functions - IPv6 has no header
@@ -18,10 +18,20 @@
  *    (stateful: a single system-wide table of in-progress reassemblies,
  *    keyed by family + a packed (addresses, protocol, identification)
  *    key, guarded by g_reassembly_mutex - see "Reassembly" below).
+ *
+ *  - Send/receive (dmip_v4_send()/_receive(), dmip_v6_receive()): the only
+ *    part of this file that reaches outside dmip itself - dmroute to pick
+ *    an egress interface/gateway, dmarp to resolve a destination MAC, and
+ *    dmnetif for the actual frame I/O. Stateless - every call is a
+ *    one-shot send or a one-shot poll-and-parse, no globals of its own
+ *    beyond what Reassembly and identification already keep.
  */
 #define DMOD_ENABLE_REGISTRATION    ON
 #include "dmod.h"
 #include "dmip.h"
+#include "dmroute.h"
+#include "dmnetif.h"
+#include "dmarp.h"
 #include "dmlist.h"
 #include "dmosi.h"
 #include <string.h>
@@ -915,6 +925,288 @@ dmod_dmip_api_declaration(1.0, int, _v6_reassemble, ( const uint8_t* fragment, s
 
     dmosi_mutex_unlock(g_reassembly_mutex);
     return status;
+}
+
+/* ============================================================================
+ *                      Send / Receive
+ *
+ * The only part of dmip.c that reaches outside dmip itself: dmroute to
+ * pick an egress interface/gateway, dmarp to resolve a destination MAC
+ * (IPv4 only - see dmip_v6_receive()'s doc comment in dmip.h for why
+ * there is no dmip_v6_send()), and dmnetif for the actual frame I/O.
+ * ========================================================================== */
+
+#define DMIP_ETH_HEADER_LEN     14u
+#define DMIP_ETHERTYPE_IPV4     0x0800u
+#define DMIP_ETHERTYPE_IPV6     0x86DDu
+
+/* Generous headroom over a max Ethernet frame - other traffic on the
+ * interface (not just IP) shows up through the same dmnetif_receive()
+ * call, and a too-small buffer would silently mangle a legitimate larger
+ * frame instead of just failing to parse. Heap-allocated (see
+ * dmip_v4_receive()/_v6_receive()) rather than a local array - at 2048
+ * bytes it would blow well past DMIP_STACK_SIZE if it were one. */
+#define DMIP_RECEIVE_BUFFER_LEN 2048u
+
+/**
+ * @brief Look up the egress interface and next-hop address for `dst`
+ *
+ * Shared by dmip_v4_get_source_address() and dmip_v4_send() - both need
+ * exactly this answer, just for different reasons (one to learn the
+ * source address, the other to actually resolve/transmit through it).
+ * Family-agnostic (dmroute itself is), even though only IPv4 callers
+ * exist today.
+ */
+static int resolve_egress(const dmip_addr_t* dst, dmnetif_iface_t* out_iface, dmip_addr_t* out_next_hop)
+{
+    dmroute_route_t route = dmroute_lookup(dst);
+    if (route == NULL)
+        return -ENETUNREACH;
+
+    dmnetif_iface_t iface = dmnetif_find_by_name(dmroute_get_iface_name(route));
+    if (iface == NULL)
+        return -ENODEV;
+
+    dmip_addr_t gateway = { 0 };
+    dmroute_get_gateway(route, &gateway);
+
+    *out_iface = iface;
+    *out_next_hop = (gateway.family != dmip_family_none) ? gateway : *dst;
+    return 0;
+}
+
+/**
+ * @brief Implementation of dmip_v4_get_source_address() - see dmip.h
+ */
+dmod_dmip_api_declaration(1.0, int, _v4_get_source_address, ( const dmip_addr_t* dst, dmip_addr_t* out_src ))
+{
+    if (dst == NULL || out_src == NULL || dst->family != dmip_family_v4)
+        return -EINVAL;
+
+    dmnetif_iface_t iface = NULL;
+    dmip_addr_t next_hop = { 0 };
+    int result = resolve_egress(dst, &iface, &next_hop);
+    if (result != 0)
+        return result;
+
+    dmnetif_get_ip_address(iface, out_src);
+    return 0;
+}
+
+/**
+ * @brief dmip_v4_fragment_func_t state for dmip_v4_send() - wraps each
+ *        emitted IP fragment in a 14-byte Ethernet header and transmits it
+ */
+typedef struct
+{
+    dmnetif_iface_t    iface;
+    dmnetif_mac_addr_t local_mac;
+    dmnetif_mac_addr_t dst_mac;
+    int                result;    /**< First failure seen so far, or 0 */
+} send_v4_ctx_t;
+
+/**
+ * @brief dmip_v4_fragment_func_t implementation backing dmip_v4_send()
+ *
+ * Once ctx->result records a failure, later calls are skipped rather than
+ * attempting to send after something has already gone wrong - there is no
+ * way to signal dmip_v4_fragment() to stop early (its callback returns
+ * void), so this just makes every call after the first failure a no-op.
+ */
+static void send_v4_fragment(const uint8_t* fragment, size_t fragment_len, void* user_data)
+{
+    send_v4_ctx_t* ctx = (send_v4_ctx_t*)user_data;
+    if (ctx->result != 0)
+        return;
+
+    size_t frame_len = DMIP_ETH_HEADER_LEN + fragment_len;
+    uint8_t* frame = Dmod_Malloc(frame_len);
+    if (frame == NULL)
+    {
+        ctx->result = -ENOMEM;
+        return;
+    }
+
+    memcpy(&frame[0], ctx->dst_mac.addr, DMNETIF_MAC_ADDR_LEN);
+    memcpy(&frame[6], ctx->local_mac.addr, DMNETIF_MAC_ADDR_LEN);
+    write_u16_be(&frame[12], DMIP_ETHERTYPE_IPV4);
+    memcpy(&frame[DMIP_ETH_HEADER_LEN], fragment, fragment_len);
+
+    if (dmnetif_send(ctx->iface, frame, frame_len) == 0)
+        ctx->result = -EIO;
+
+    Dmod_Free(frame);
+}
+
+/**
+ * @brief Implementation of dmip_v4_send() - see dmip.h
+ */
+dmod_dmip_api_declaration(1.0, int, _v4_send, ( const dmip_v4_header_t* header, const void* payload, size_t payload_len, uint32_t arp_timeout_ms ))
+{
+    if (header == NULL || (payload == NULL && payload_len > 0) || header->dst.family != dmip_family_v4)
+        return -EINVAL;
+
+    dmnetif_iface_t iface = NULL;
+    dmip_addr_t next_hop = { 0 };
+    int result = resolve_egress(&header->dst, &iface, &next_hop);
+    if (result != 0)
+        return result;
+
+    dmnetif_mac_addr_t dst_mac = { 0 };
+    if (dmarp_resolve(iface, &next_hop, &dst_mac, arp_timeout_ms) != 0)
+        return -EHOSTUNREACH;
+
+    dmip_v4_header_t full_header = *header;
+    if (full_header.src.family == dmip_family_none)
+    {
+        dmnetif_get_ip_address(iface, &full_header.src); /* best-effort, same as dmarp_resolve()'s own local_ip */
+    }
+
+    send_v4_ctx_t ctx = { .iface = iface, .dst_mac = dst_mac, .result = 0 };
+    dmnetif_get_mac_address(iface, &ctx.local_mac);
+
+    uint16_t mtu = DMNETIF_DEFAULT_MTU;
+    dmnetif_get_mtu(iface, &mtu);
+
+    result = dmip_v4_fragment(&full_header, payload, payload_len, mtu, send_v4_fragment, &ctx);
+    if (result != 0)
+        return result;
+
+    return ctx.result;
+}
+
+/**
+ * @brief Function pointer type matching dmip_v4_reassemble()/_v6_reassemble()'s
+ *        signature - lets receive_one_frame() dispatch to either without
+ *        caring which
+ */
+typedef int (*reassemble_func_t)( const uint8_t* fragment, size_t length, uint8_t** out_packet, size_t* out_length );
+
+/**
+ * @brief Shared implementation behind dmip_v4_receive()/_v6_receive() -
+ *        one dmnetif_receive() call, checked against a single expected
+ *        ethertype, fed into `reassemble` on a match
+ *
+ * Not used by dmip_receive() (see dmip.h's doc comment on it) - that one
+ * needs to check *both* ethertypes against the same received frame,
+ * which this single-ethertype shape can't express.
+ */
+static int receive_one_frame(dmnetif_iface_t iface, uint16_t expected_ethertype, reassemble_func_t reassemble, uint8_t** out_packet, size_t* out_length)
+{
+    uint8_t* frame = Dmod_Malloc(DMIP_RECEIVE_BUFFER_LEN);
+    if (frame == NULL)
+        return -ENOMEM;
+
+    size_t frame_len = dmnetif_receive(iface, frame, DMIP_RECEIVE_BUFFER_LEN);
+    int result;
+    if (frame_len == 0)
+    {
+        result = -EAGAIN;
+    }
+    else if (frame_len < DMIP_ETH_HEADER_LEN || read_u16_be(&frame[12]) != expected_ethertype)
+    {
+        result = -EPROTO;
+    }
+    else
+    {
+        result = reassemble(frame + DMIP_ETH_HEADER_LEN, frame_len - DMIP_ETH_HEADER_LEN, out_packet, out_length);
+    }
+
+    Dmod_Free(frame);
+    return result;
+}
+
+/**
+ * @brief Implementation of dmip_v4_receive() - see dmip.h
+ */
+dmod_dmip_api_declaration(1.0, int, _v4_receive, ( dmnetif_iface_t iface, uint8_t** out_packet, size_t* out_length ))
+{
+    if (iface == NULL || out_packet == NULL || out_length == NULL)
+        return -EINVAL;
+
+    return receive_one_frame(iface, DMIP_ETHERTYPE_IPV4, dmip_v4_reassemble, out_packet, out_length);
+}
+
+/**
+ * @brief Implementation of dmip_v6_receive() - see dmip.h
+ */
+dmod_dmip_api_declaration(1.0, int, _v6_receive, ( dmnetif_iface_t iface, uint8_t** out_packet, size_t* out_length ))
+{
+    if (iface == NULL || out_packet == NULL || out_length == NULL)
+        return -EINVAL;
+
+    return receive_one_frame(iface, DMIP_ETHERTYPE_IPV6, dmip_v6_reassemble, out_packet, out_length);
+}
+
+/**
+ * @brief Implementation of dmip_send() - see dmip.h
+ */
+dmod_dmip_api_declaration(1.0, int, _send, ( const dmip_header_t* header, const void* payload, size_t payload_len, uint32_t arp_timeout_ms ))
+{
+    if (header == NULL)
+        return -EINVAL;
+
+    switch (header->family)
+    {
+        case dmip_family_v4:
+            return dmip_v4_send(&header->header.v4, payload, payload_len, arp_timeout_ms);
+        case dmip_family_v6:
+            /* No dmip_v6_send() yet - see dmip_v6_receive()'s doc comment
+             * in dmip.h for why (no NDP module to resolve a next-hop MAC
+             * through). */
+            return -ENOSYS;
+        default:
+            return -EINVAL;
+    }
+}
+
+/**
+ * @brief Implementation of dmip_receive() - see dmip.h
+ *
+ * Can't share receive_one_frame() (single expected ethertype) - this one
+ * accepts either and reports back which it got, so the ethertype check
+ * is inlined here instead.
+ */
+dmod_dmip_api_declaration(1.0, int, _receive, ( dmnetif_iface_t iface, dmip_family_t* out_family, uint8_t** out_packet, size_t* out_length ))
+{
+    if (iface == NULL || out_family == NULL || out_packet == NULL || out_length == NULL)
+        return -EINVAL;
+
+    uint8_t* frame = Dmod_Malloc(DMIP_RECEIVE_BUFFER_LEN);
+    if (frame == NULL)
+        return -ENOMEM;
+
+    size_t frame_len = dmnetif_receive(iface, frame, DMIP_RECEIVE_BUFFER_LEN);
+    int result;
+    if (frame_len == 0)
+    {
+        result = -EAGAIN;
+    }
+    else if (frame_len < DMIP_ETH_HEADER_LEN)
+    {
+        result = -EPROTO;
+    }
+    else
+    {
+        uint16_t ethertype = read_u16_be(&frame[12]);
+        if (ethertype == DMIP_ETHERTYPE_IPV4)
+        {
+            *out_family = dmip_family_v4;
+            result = dmip_v4_reassemble(frame + DMIP_ETH_HEADER_LEN, frame_len - DMIP_ETH_HEADER_LEN, out_packet, out_length);
+        }
+        else if (ethertype == DMIP_ETHERTYPE_IPV6)
+        {
+            *out_family = dmip_family_v6;
+            result = dmip_v6_reassemble(frame + DMIP_ETH_HEADER_LEN, frame_len - DMIP_ETH_HEADER_LEN, out_packet, out_length);
+        }
+        else
+        {
+            result = -EPROTO;
+        }
+    }
+
+    Dmod_Free(frame);
+    return result;
 }
 
 /* ---- DMOD lifecycle ---- */

@@ -31,14 +31,9 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# dmip: in-tree sibling under dmnet/lib (added earlier via the top-level
-# add_subdirectory(lib) - see dmnet/CMakeLists.txt), not a separately
-# published module, so it's linked directly rather than through
-# dmod_link_modules() (which fetches a *released* module's headers via
-# dmf-get and would fail here since dmip has no such release) - same
-# convention tools/ifconfig/CMakeLists.txt uses for dmnetif. dmroute has no
-# dependency on dmnetif itself - see docs/dmroute.md for why.
-target_link_libraries(${DMOD_MODULE_NAME} dmip_if)
+# dmroute has no dependency on any other in-tree module - it owns the
+# address type (dmroute_addr_t) rather than borrowing it from dmip, and has
+# no dependency on dmnetif either - see docs/dmroute.md for why.
 
 # dmlist: backs the route table
 # dmosi:  mutex guarding the route table

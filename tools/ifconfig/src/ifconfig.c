@@ -10,7 +10,7 @@
  */
 #include "dmod.h"
 #include "dmnetif.h"
-#include "dmip.h"
+#include "dmroute.h"
 #include <string.h>
 
 static int hex_nibble(char c)
@@ -70,15 +70,15 @@ static bool parse_uint16(const char* s, uint16_t* out)
     return true;
 }
 
-/* Parses "A.B.C.D" (each octet 0-255) into an IPv4 dmip_addr_t. */
-static bool parse_ipv4_address(const char* s, dmip_addr_t* ip)
+/* Parses "A.B.C.D" (each octet 0-255) into an IPv4 dmroute_addr_t. */
+static bool parse_ipv4_address(const char* s, dmroute_addr_t* ip)
 {
     if (s == NULL)
         return false;
 
-    ip->family = dmip_family_v4;
+    ip->family = dmroute_family_v4;
 
-    for (int i = 0; i < DMIP_IPV4_ADDR_LEN; i++)
+    for (int i = 0; i < DMROUTE_IPV4_ADDR_LEN; i++)
     {
         if (*s < '0' || *s > '9')
             return false;
@@ -94,7 +94,7 @@ static bool parse_ipv4_address(const char* s, dmip_addr_t* ip)
         }
         ip->addr.v4[i] = (uint8_t)octet;
 
-        if (i < DMIP_IPV4_ADDR_LEN - 1)
+        if (i < DMROUTE_IPV4_ADDR_LEN - 1)
         {
             if (*s != '.')
                 return false;
@@ -112,16 +112,16 @@ static void print_mac_address(const dmnetif_mac_addr_t* mac)
                 mac->addr[3], mac->addr[4], mac->addr[5]);
 }
 
-static void print_ipv4_address(const dmip_addr_t* ip)
+static void print_ipv4_address(const dmroute_addr_t* ip)
 {
     Dmod_Printf("%u.%u.%u.%u", ip->addr.v4[0], ip->addr.v4[1], ip->addr.v4[2], ip->addr.v4[3]);
 }
 
 /* IPv6 printed as 8 plain hex groups (no "::" run-length compression) -
  * more verbose than canonical form, but unambiguous and simple. */
-static void print_ipv6_address(const dmip_addr_t* ip)
+static void print_ipv6_address(const dmroute_addr_t* ip)
 {
-    for (int i = 0; i < DMIP_IPV6_ADDR_LEN; i += 2)
+    for (int i = 0; i < DMROUTE_IPV6_ADDR_LEN; i += 2)
     {
         Dmod_Printf("%s%02x%02x", (i > 0) ? ":" : "", ip->addr.v6[i], ip->addr.v6[i + 1]);
     }
@@ -130,22 +130,22 @@ static void print_ipv6_address(const dmip_addr_t* ip)
 /* netmask/broadcast are only ever shown alongside an IPv4 address - real
  * ifconfig has no netmask/broadcast concept for IPv6 (that's what
  * prefixlen is for, which dmnetif doesn't track). */
-static void print_ip_address(dmnetif_iface_t iface, const dmip_addr_t* ip)
+static void print_ip_address(dmnetif_iface_t iface, const dmroute_addr_t* ip)
 {
-    if (ip->family == dmip_family_v4)
+    if (ip->family == dmroute_family_v4)
     {
         Dmod_Printf("        inet ");
         print_ipv4_address(ip);
 
-        dmip_addr_t netmask;
-        if (dmnetif_get_netmask(iface, &netmask) == 0 && netmask.family == dmip_family_v4)
+        dmroute_addr_t netmask;
+        if (dmnetif_get_netmask(iface, &netmask) == 0 && netmask.family == dmroute_family_v4)
         {
             Dmod_Printf("  netmask ");
             print_ipv4_address(&netmask);
         }
 
-        dmip_addr_t broadcast;
-        if (dmnetif_get_broadcast(iface, &broadcast) == 0 && broadcast.family == dmip_family_v4)
+        dmroute_addr_t broadcast;
+        if (dmnetif_get_broadcast(iface, &broadcast) == 0 && broadcast.family == dmroute_family_v4)
         {
             Dmod_Printf("  broadcast ");
             print_ipv4_address(&broadcast);
@@ -153,7 +153,7 @@ static void print_ip_address(dmnetif_iface_t iface, const dmip_addr_t* ip)
 
         Dmod_Printf("\n");
     }
-    else if (ip->family == dmip_family_v6)
+    else if (ip->family == dmroute_family_v6)
     {
         Dmod_Printf("        inet6 ");
         print_ipv6_address(ip);
@@ -176,8 +176,8 @@ static void print_interface(dmnetif_iface_t iface)
                 running ? ",RUNNING" : "",
                 mtu);
 
-    dmip_addr_t ip;
-    if (dmnetif_get_ip_address(iface, &ip) == 0 && ip.family != dmip_family_none)
+    dmroute_addr_t ip;
+    if (dmnetif_get_ip_address(iface, &ip) == 0 && ip.family != dmroute_family_none)
     {
         print_ip_address(iface, &ip);
     }
@@ -330,7 +330,7 @@ int main(int argc, char *argv[])
 
     if (strcmp(command, "broadcast") == 0 && argc == 4)
     {
-        dmip_addr_t broadcast;
+        dmroute_addr_t broadcast;
         if (!parse_ipv4_address(argv[3], &broadcast))
         {
             Dmod_Printf("%s: invalid broadcast address '%s'\n", prog, argv[3]);

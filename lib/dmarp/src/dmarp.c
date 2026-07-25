@@ -21,7 +21,7 @@
  *   offset 14: hardware type   (2 bytes) - DMARP_HTYPE_ETHERNET
  *   offset 16: protocol type   (2 bytes) - DMARP_PTYPE_IPV4
  *   offset 18: hw addr length  (1 byte)  - DMNETIF_MAC_ADDR_LEN
- *   offset 19: proto addr len  (1 byte)  - DMIP_IPV4_ADDR_LEN
+ *   offset 19: proto addr len  (1 byte)  - DMROUTE_IPV4_ADDR_LEN
  *   offset 20: opcode          (2 bytes) - DMARP_OP_REQUEST/_REPLY
  *   offset 22: sender hw addr  (6 bytes)
  *   offset 28: sender proto addr (4 bytes)
@@ -67,9 +67,9 @@
 struct dmarp_entry
 {
     char                iface_name[DMNETIF_NAME_MAX_LEN + 1]; /**< Name of the interface this entry was cached against - a name, not a dmnetif_iface_t, so a stale entry across interface churn is merely wrong, never a dangling handle (same reasoning as dmroute's routes, see dmroute.h) */
-    dmip_addr_t         ip;                                     /**< Resolved address */
-    dmnetif_mac_addr_t  mac;                                     /**< Resolved MAC address */
-    uint32_t            cached_at;                                /**< dmosi_get_tick_count() value when this entry was last (re)written */
+    dmroute_addr_t      ip;                                   /**< Resolved address */
+    dmnetif_mac_addr_t  mac;                                  /**< Resolved MAC address */
+    uint32_t            cached_at;                            /**< dmosi_get_tick_count() value when this entry was last (re)written */
 };
 
 /**
@@ -93,7 +93,7 @@ static dmosi_mutex_t g_mutex = NULL;
 typedef struct
 {
     const char*        iface_name;
-    const dmip_addr_t* ip;
+    const dmroute_addr_t* ip;
 } cache_key_t;
 
 /**
@@ -106,7 +106,7 @@ typedef struct
  */
 static bool ipv4_bytes_equal(const uint8_t* a, const uint8_t* b)
 {
-    for (int i = 0; i < DMIP_IPV4_ADDR_LEN; i++)
+    for (int i = 0; i < DMROUTE_IPV4_ADDR_LEN; i++)
     {
         if (a[i] != b[i])
             return false;
@@ -156,7 +156,7 @@ static bool is_entry_fresh(const struct dmarp_entry* entry)
  *
  * @return true if a fresh entry was found (and `mac` filled in)
  */
-static bool cache_lookup(dmnetif_iface_t iface, const dmip_addr_t* ip, dmnetif_mac_addr_t* mac)
+static bool cache_lookup(dmnetif_iface_t iface, const dmroute_addr_t* ip, dmnetif_mac_addr_t* mac)
 {
     const char* iface_name = dmnetif_get_name(iface);
     if (iface_name == NULL)
@@ -184,7 +184,7 @@ static bool cache_lookup(dmnetif_iface_t iface, const dmip_addr_t* ip, dmnetif_m
  * appending a duplicate - both an expired entry getting refreshed and a
  * caller overwriting a manually-seeded one go through this same path.
  */
-static void cache_insert(dmnetif_iface_t iface, const dmip_addr_t* ip, const dmnetif_mac_addr_t* mac)
+static void cache_insert(dmnetif_iface_t iface, const dmroute_addr_t* ip, const dmnetif_mac_addr_t* mac)
 {
     const char* iface_name = dmnetif_get_name(iface);
     if (iface_name == NULL)
@@ -243,15 +243,15 @@ static uint16_t read_u16_be(const uint8_t* p)
  * @param frame     Output buffer, must be at least DMARP_FRAME_LEN bytes
  * @param local_mac The resolving interface's own MAC address
  * @param local_ip  The resolving interface's own IP address, or a
- *                  dmip_family_none address if it doesn't have one yet
+ *                  dmroute_family_none address if it doesn't have one yet
  *                  (written as all-zero sender protocol address, same as
  *                  a real host ARPing before it has an address of its
  *                  own - e.g. during DHCP)
  * @param target_ip The address being resolved (family must already be
- *                  dmip_family_v4 - checked by dmarp_resolve() before
+ *                  dmroute_family_v4 - checked by dmarp_resolve() before
  *                  this is called)
  */
-static void build_request_frame(uint8_t* frame, const dmnetif_mac_addr_t* local_mac, const dmip_addr_t* local_ip, const dmip_addr_t* target_ip)
+static void build_request_frame(uint8_t* frame, const dmnetif_mac_addr_t* local_mac, const dmroute_addr_t* local_ip, const dmroute_addr_t* target_ip)
 {
     memset(frame, 0, DMARP_FRAME_LEN);
 
@@ -263,15 +263,15 @@ static void build_request_frame(uint8_t* frame, const dmnetif_mac_addr_t* local_
     write_u16_be(&arp[0], DMARP_HTYPE_ETHERNET);
     write_u16_be(&arp[2], DMARP_PTYPE_IPV4);
     arp[4] = DMNETIF_MAC_ADDR_LEN;
-    arp[5] = DMIP_IPV4_ADDR_LEN;
+    arp[5] = DMROUTE_IPV4_ADDR_LEN;
     write_u16_be(&arp[6], DMARP_OP_REQUEST);
     memcpy(&arp[8], local_mac->addr, DMNETIF_MAC_ADDR_LEN);
-    if (local_ip->family == dmip_family_v4)
+    if (local_ip->family == dmroute_family_v4)
     {
-        memcpy(&arp[14], local_ip->addr.v4, DMIP_IPV4_ADDR_LEN);
+        memcpy(&arp[14], local_ip->addr.v4, DMROUTE_IPV4_ADDR_LEN);
     }
     /* arp[18..23] (target hw addr) already zeroed - unknown, that's the point */
-    memcpy(&arp[24], target_ip->addr.v4, DMIP_IPV4_ADDR_LEN);
+    memcpy(&arp[24], target_ip->addr.v4, DMROUTE_IPV4_ADDR_LEN);
 }
 
 /**
@@ -289,7 +289,7 @@ static void build_request_frame(uint8_t* frame, const dmnetif_mac_addr_t* local_
  *
  * @return true if `frame` is a matching ARP reply
  */
-static bool parse_reply_frame(const uint8_t* frame, size_t length, const dmip_addr_t* expected_sender_ip, dmnetif_mac_addr_t* out_mac)
+static bool parse_reply_frame(const uint8_t* frame, size_t length, const dmroute_addr_t* expected_sender_ip, dmnetif_mac_addr_t* out_mac)
 {
     if (length < DMARP_FRAME_LEN)
         return false;
@@ -301,7 +301,7 @@ static bool parse_reply_frame(const uint8_t* frame, size_t length, const dmip_ad
     if (read_u16_be(&arp[0]) != DMARP_HTYPE_ETHERNET || read_u16_be(&arp[2]) != DMARP_PTYPE_IPV4)
         return false;
 
-    if (arp[4] != DMNETIF_MAC_ADDR_LEN || arp[5] != DMIP_IPV4_ADDR_LEN)
+    if (arp[4] != DMNETIF_MAC_ADDR_LEN || arp[5] != DMROUTE_IPV4_ADDR_LEN)
         return false;
 
     if (read_u16_be(&arp[6]) != DMARP_OP_REPLY)
@@ -368,12 +368,12 @@ int dmod_deinit(void)
 /**
  * @brief Implementation of dmarp_resolve() - see dmarp.h
  */
-dmod_dmarp_api_declaration(1.0, int, _resolve, ( dmnetif_iface_t iface, const dmip_addr_t* ip, dmnetif_mac_addr_t* mac, uint32_t timeout_ms ))
+dmod_dmarp_api_declaration(1.0, int, _resolve, ( dmnetif_iface_t iface, const dmroute_addr_t* ip, dmnetif_mac_addr_t* mac, uint32_t timeout_ms ))
 {
     if (iface == NULL || ip == NULL || mac == NULL)
         return -EINVAL;
 
-    if (ip->family != dmip_family_v4)
+    if (ip->family != dmroute_family_v4)
         return -EINVAL;
 
     if (cache_lookup(iface, ip, mac))
@@ -386,7 +386,7 @@ dmod_dmarp_api_declaration(1.0, int, _resolve, ( dmnetif_iface_t iface, const dm
         return -ENODEV;
     }
 
-    dmip_addr_t local_ip = { 0 };
+    dmroute_addr_t local_ip = { 0 };
     dmnetif_get_ip_address(iface, &local_ip); /* best-effort - family_none is fine, see build_request_frame() */
 
     uint8_t request[DMARP_FRAME_LEN];
@@ -420,9 +420,9 @@ dmod_dmarp_api_declaration(1.0, int, _resolve, ( dmnetif_iface_t iface, const dm
 /**
  * @brief Implementation of dmarp_cache_lookup() - see dmarp.h
  */
-dmod_dmarp_api_declaration(1.0, bool, _cache_lookup, ( dmnetif_iface_t iface, const dmip_addr_t* ip, dmnetif_mac_addr_t* mac ))
+dmod_dmarp_api_declaration(1.0, bool, _cache_lookup, ( dmnetif_iface_t iface, const dmroute_addr_t* ip, dmnetif_mac_addr_t* mac ))
 {
-    if (iface == NULL || ip == NULL || mac == NULL || ip->family != dmip_family_v4)
+    if (iface == NULL || ip == NULL || mac == NULL || ip->family != dmroute_family_v4)
         return false;
 
     return cache_lookup(iface, ip, mac);
@@ -431,9 +431,9 @@ dmod_dmarp_api_declaration(1.0, bool, _cache_lookup, ( dmnetif_iface_t iface, co
 /**
  * @brief Implementation of dmarp_cache_insert() - see dmarp.h
  */
-dmod_dmarp_api_declaration(1.0, void, _cache_insert, ( dmnetif_iface_t iface, const dmip_addr_t* ip, const dmnetif_mac_addr_t* mac ))
+dmod_dmarp_api_declaration(1.0, void, _cache_insert, ( dmnetif_iface_t iface, const dmroute_addr_t* ip, const dmnetif_mac_addr_t* mac ))
 {
-    if (iface == NULL || ip == NULL || mac == NULL || ip->family != dmip_family_v4)
+    if (iface == NULL || ip == NULL || mac == NULL || ip->family != dmroute_family_v4)
         return;
 
     cache_insert(iface, ip, mac);
@@ -442,7 +442,7 @@ dmod_dmarp_api_declaration(1.0, void, _cache_insert, ( dmnetif_iface_t iface, co
 /**
  * @brief Implementation of dmarp_cache_remove() - see dmarp.h
  */
-dmod_dmarp_api_declaration(1.0, void, _cache_remove, ( dmnetif_iface_t iface, const dmip_addr_t* ip ))
+dmod_dmarp_api_declaration(1.0, void, _cache_remove, ( dmnetif_iface_t iface, const dmroute_addr_t* ip ))
 {
     if (ip == NULL)
         return;

@@ -22,14 +22,14 @@ request every time.
 │                  DMNETIF                      │
 │   named interfaces, send/receive one frame    │
 ├──────────────────────────────────────────────┤
-│                  DMIP                         │
-│   shared dmip_addr_t type                     │
+│                  DMROUTE                      │
+│   shared dmroute_addr_t type                  │
 └──────────────────────────────────────────────┘
 ```
 
 IPv6 is out of scope: IPv6 neighbor discovery uses NDP over ICMPv6, an
 entirely different protocol, not ARP - every dmarp function only ever
-deals with `dmip_family_v4` addresses.
+deals with `dmroute_family_v4` addresses.
 
 ## Resolution
 
@@ -90,18 +90,17 @@ module runtime gives no struct-packing guarantee, so this is the same
 `tools/ifconfig/src/ifconfig.c` already use for address parsing.
 
 If the resolving interface has no IP address of its own yet
-(`dmnetif_get_ip_address()` returns `dmip_family_none`), the request's
+(`dmnetif_get_ip_address()` returns `dmroute_family_none`), the request's
 sender protocol address is written as all-zero rather than failing - a
 real host can legitimately ARP before it has an address of its own (e.g.
 during DHCP), so this is not treated as an error.
 
 ## Dependencies
 
-- `dmip` - the shared `dmip_addr_t` type every address field uses
+- `dmroute` - the shared `dmroute_addr_t` type every address field uses
 - `dmnetif` - `dmnetif_send()`/`_receive()` to exchange frames,
   `dmnetif_get_mac_address()`/`_get_ip_address()` to build a request,
-  `dmnetif_get_name()` to key cache entries. Nothing depends on dmarp in
-  turn, so this is a plain one-way dependency, not a DIF/MAL.
+  `dmnetif_get_name()` to key cache entries.
 - `dmlist` - backs the cache
 - `dmosi` - mutex guarding the cache, plus `dmosi_get_tick_count()`/
   `_thread_sleep()` for `dmarp_resolve()`'s reply poll loop

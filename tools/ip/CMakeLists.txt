@@ -23,18 +23,17 @@ dmod_add_executable(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/ip.c
 )
 
-# dmroute: the routing table this tool lists/controls (`ip route ...`).
+# dmroute: the routing table this tool lists/controls (`ip route ...`),
+#          and the address type (dmroute_addr_t) both its and dmnetif's
+#          APIs use.
 # dmnetif: validates `dev <iface>` on `ip route add` (dmroute itself
 #          can't - see dmroute.h's file comment).
-# dmip:    dmip_addr_t, the address type both dmroute's and dmnetif's APIs
-#          use - dmroute_if/dmnetif_if alone don't carry its include dir.
-# All three are in-tree siblings (lib/dmroute, lib/dmnetif, lib/dmip -
-# added earlier via the top-level add_subdirectory(lib) - see
-# dmnet/CMakeLists.txt), not separately published modules, so they're
-# linked directly rather than through dmod_link_modules() (which fetches a
-# *released* module's headers via dmf-get and would fail here since none
-# of them has such a release) - same convention
-# tools/ifconfig/CMakeLists.txt uses for dmnetif.
-target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if dmip_if)
+# Both are in-tree siblings (lib/dmroute, lib/dmnetif - added earlier via
+# the top-level add_subdirectory(lib) - see dmnet/CMakeLists.txt), not
+# separately published modules, so they're linked directly rather than
+# through dmod_link_modules() (which fetches a *released* module's headers
+# via dmf-get and would fail here since neither has such a release) - same
+# convention tools/ifconfig/CMakeLists.txt uses for dmnetif.
+target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if)
 
 add_subdirectory(tests)

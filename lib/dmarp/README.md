@@ -6,7 +6,7 @@ dmarp DMOD library module - resolves an IPv4 address to a MAC address on a
 directly-connected link (ARP, RFC 826), with a cache so repeated
 resolutions of the same destination don't re-send a request every time.
 Built on top of [dmnetif](../dmnetif) (`dmnetif_send()`/`_receive()` to
-exchange frames) and [dmip](../dmip) (the shared address type).
+exchange frames) and [dmroute](../dmroute) (the shared address type).
 
 ## Building
 

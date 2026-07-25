@@ -10,8 +10,8 @@ API's shape.
 | `DMARP_CACHE_TTL_MS`          | 60000   | How long a cache entry stays valid, however it got there. |
 | `DMARP_DEFAULT_TIMEOUT_MS`    | 1000    | Suggested `timeout_ms` for `dmarp_resolve()` when you don't have a strong opinion. |
 
-All addresses use `dmip_addr_t` from [dmip](../../dmip); MAC addresses use
-`dmnetif_mac_addr_t` from [dmnetif](../../dmnetif).
+All addresses use `dmroute_addr_t` from [dmroute](../../dmroute); MAC
+addresses use `dmnetif_mac_addr_t` from [dmnetif](../../dmnetif).
 
 ## Resolution
 

@@ -31,18 +31,18 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# dmip and dmroute: in-tree siblings under dmnet/lib (added earlier via the
-# top-level add_subdirectory(lib), in the order dmip -> dmroute -> dmnetif -
-# see dmnet/CMakeLists.txt and lib/CMakeLists.txt), not separately published
-# modules, so they're linked directly rather than through dmod_link_modules()
+# dmroute: an in-tree sibling under dmnet/lib (added earlier via the
+# top-level add_subdirectory(lib), in the order dmroute -> dmnetif - see
+# dmnet/CMakeLists.txt and lib/CMakeLists.txt), not a separately published
+# module, so it's linked directly rather than through dmod_link_modules()
 # (which fetches a *released* module's headers via dmf-get and would fail
-# here since neither has such a release) - same convention
+# here since dmroute has no such release) - same convention
 # tools/ifconfig/CMakeLists.txt uses for dmnetif itself.
-#   dmip:    dmip_addr_t, the type dmnetif's IP/netmask/broadcast fields use
-#   dmroute: dmnetif_set_ip_address() calls dmroute_add()/_remove() directly
-#            to keep an interface's connected route in sync - see
-#            update_connected_route() in src/dmnetif.c
-target_link_libraries(${DMOD_MODULE_NAME} dmip_if dmroute_if)
+#   dmroute_addr_t: the type dmnetif's IP/netmask/broadcast fields use
+#   dmnetif_set_ip_address() also calls dmroute_add()/_remove() directly
+#   to keep an interface's connected route in sync - see
+#   update_connected_route() in src/dmnetif.c
+target_link_libraries(${DMOD_MODULE_NAME} dmroute_if)
 
 # dmlist: backs the interface registry
 # dmdrvi: DMDRVI_IOCTL_NET_* commands/types used to talk to a registered

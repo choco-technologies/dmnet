@@ -20,7 +20,7 @@
  */
 #include "dmod_test.h"
 #include "dmnetif.h"
-#include "dmip.h"
+#include "dmroute.h"
 #include <string.h>
 
 #define TEST_DEVICE_PATH "/dev/null"
@@ -33,24 +33,24 @@ void dmod_test_setup(void)
 
     /* So "show"/"list" steps below exercise the inet/netmask/broadcast
      * print path too. */
-    dmip_addr_t ip = { 0 };
-    ip.family = dmip_family_v4;
+    dmroute_addr_t ip = { 0 };
+    ip.family = dmroute_family_v4;
     ip.addr.v4[0] = 192;
     ip.addr.v4[1] = 168;
     ip.addr.v4[2] = 1;
     ip.addr.v4[3] = 42;
     dmnetif_set_ip_address(g_iface, &ip);
 
-    dmip_addr_t netmask = { 0 };
-    netmask.family = dmip_family_v4;
+    dmroute_addr_t netmask = { 0 };
+    netmask.family = dmroute_family_v4;
     netmask.addr.v4[0] = 255;
     netmask.addr.v4[1] = 255;
     netmask.addr.v4[2] = 255;
     netmask.addr.v4[3] = 0;
     dmnetif_set_netmask(g_iface, &netmask);
 
-    dmip_addr_t broadcast = { 0 };
-    broadcast.family = dmip_family_v4;
+    dmroute_addr_t broadcast = { 0 };
+    broadcast.family = dmroute_family_v4;
     broadcast.addr.v4[0] = 192;
     broadcast.addr.v4[1] = 168;
     broadcast.addr.v4[2] = 1;
@@ -194,9 +194,9 @@ DMOD_TEST_STEP(broadcast_valid_address_succeeds)
     char* argv[] = { "ifconfig", "test0", "broadcast", "192.168.1.255" };
     DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ifconfig", 4, argv), 0);
 
-    dmip_addr_t broadcast = { 0 };
+    dmroute_addr_t broadcast = { 0 };
     DMOD_TEST_EXPECT_EQ(dmnetif_get_broadcast(g_iface, &broadcast), 0);
-    DMOD_TEST_EXPECT_EQ(broadcast.family, dmip_family_v4);
+    DMOD_TEST_EXPECT_EQ(broadcast.family, dmroute_family_v4);
     DMOD_TEST_EXPECT_EQ(broadcast.addr.v4[3], (uint8_t)255);
 }
 

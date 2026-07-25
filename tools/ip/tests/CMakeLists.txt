@@ -13,5 +13,5 @@ dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
 # ip_test.c and tools/ifconfig/tests/ifconfig_test.c for the same
 # pattern), which loads/runs/unloads it per call instead of holding it
 # resident for the whole test run.
-# dmip: dmip_addr_t, used directly to build test addresses.
-target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if dmip_if)
+# dmroute_addr_t (from dmroute_if) is used directly to build test addresses.
+target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if)

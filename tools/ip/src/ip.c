@@ -13,7 +13,6 @@
 #include "dmod.h"
 #include "dmroute.h"
 #include "dmnetif.h"
-#include "dmip.h"
 #include <string.h>
 
 /* Parses a plain decimal uint32_t (dmod's minimal module runtime has no
@@ -39,15 +38,15 @@ static bool parse_uint32(const char* s, uint32_t* out)
     return true;
 }
 
-/* Parses "A.B.C.D" (each octet 0-255) into an IPv4 dmip_addr_t. */
-static bool parse_ipv4_address(const char* s, dmip_addr_t* ip)
+/* Parses "A.B.C.D" (each octet 0-255) into an IPv4 dmroute_addr_t. */
+static bool parse_ipv4_address(const char* s, dmroute_addr_t* ip)
 {
     if (s == NULL)
         return false;
 
-    ip->family = dmip_family_v4;
+    ip->family = dmroute_family_v4;
 
-    for (int i = 0; i < DMIP_IPV4_ADDR_LEN; i++)
+    for (int i = 0; i < DMROUTE_IPV4_ADDR_LEN; i++)
     {
         if (*s < '0' || *s > '9')
             return false;
@@ -63,7 +62,7 @@ static bool parse_ipv4_address(const char* s, dmip_addr_t* ip)
         }
         ip->addr.v4[i] = (uint8_t)octet;
 
-        if (i < DMIP_IPV4_ADDR_LEN - 1)
+        if (i < DMROUTE_IPV4_ADDR_LEN - 1)
         {
             if (*s != '.')
                 return false;
@@ -74,10 +73,10 @@ static bool parse_ipv4_address(const char* s, dmip_addr_t* ip)
     return *s == '\0';
 }
 
-static void prefix_len_to_netmask(uint8_t prefix_len, dmip_addr_t* netmask)
+static void prefix_len_to_netmask(uint8_t prefix_len, dmroute_addr_t* netmask)
 {
-    netmask->family = dmip_family_v4;
-    for (int i = 0; i < DMIP_IPV4_ADDR_LEN; i++)
+    netmask->family = dmroute_family_v4;
+    for (int i = 0; i < DMROUTE_IPV4_ADDR_LEN; i++)
     {
         int bits_left = (int)prefix_len - (i * 8);
         if (bits_left >= 8)
@@ -89,10 +88,10 @@ static void prefix_len_to_netmask(uint8_t prefix_len, dmip_addr_t* netmask)
     }
 }
 
-static int netmask_to_prefix_len(const dmip_addr_t* netmask)
+static int netmask_to_prefix_len(const dmroute_addr_t* netmask)
 {
     int bits = 0;
-    for (int i = 0; i < DMIP_IPV4_ADDR_LEN; i++)
+    for (int i = 0; i < DMROUTE_IPV4_ADDR_LEN; i++)
     {
         uint8_t byte = netmask->addr.v4[i];
         while (byte != 0)
@@ -108,15 +107,15 @@ static int netmask_to_prefix_len(const dmip_addr_t* netmask)
  * destination address and netmask. A bare address without "/N" is a host
  * route (netmask /32) - same default `ip route add <addr> dev <iface>`
  * uses. */
-static bool parse_destination(const char* s, dmip_addr_t* dest, dmip_addr_t* netmask)
+static bool parse_destination(const char* s, dmroute_addr_t* dest, dmroute_addr_t* netmask)
 {
     if (s == NULL)
         return false;
 
     if (strcmp(s, "default") == 0)
     {
-        dest->family = dmip_family_v4;
-        memset(dest->addr.v4, 0, DMIP_IPV4_ADDR_LEN);
+        dest->family = dmroute_family_v4;
+        memset(dest->addr.v4, 0, DMROUTE_IPV4_ADDR_LEN);
         prefix_len_to_netmask(0, netmask);
         return true;
     }
@@ -146,21 +145,21 @@ static bool parse_destination(const char* s, dmip_addr_t* dest, dmip_addr_t* net
     return true;
 }
 
-static void print_ipv4_address(const dmip_addr_t* ip)
+static void print_ipv4_address(const dmroute_addr_t* ip)
 {
     Dmod_Printf("%u.%u.%u.%u", ip->addr.v4[0], ip->addr.v4[1], ip->addr.v4[2], ip->addr.v4[3]);
 }
 
 static void print_route(dmroute_route_t route)
 {
-    dmip_addr_t destination = { 0 };
-    dmip_addr_t netmask = { 0 };
-    dmip_addr_t gateway = { 0 };
+    dmroute_addr_t destination = { 0 };
+    dmroute_addr_t netmask = { 0 };
+    dmroute_addr_t gateway = { 0 };
     dmroute_get_destination(route, &destination);
     dmroute_get_netmask(route, &netmask);
     dmroute_get_gateway(route, &gateway);
 
-    if (destination.family != dmip_family_v4)
+    if (destination.family != dmroute_family_v4)
     {
         /* dmroute itself is family-agnostic (e.g. an interface could get
          * an IPv6 address and pick up a v6 connected route), but this CLI
@@ -185,7 +184,7 @@ static void print_route(dmroute_route_t route)
         Dmod_Printf("/%d", netmask_to_prefix_len(&netmask));
     }
 
-    if (gateway.family != dmip_family_none)
+    if (gateway.family != dmroute_family_none)
     {
         Dmod_Printf(" via ");
         print_ipv4_address(&gateway);
@@ -223,8 +222,8 @@ static void print_usage(const char* prog)
 
 static int cmd_show_one(const char* prog, const char* dest_str)
 {
-    dmip_addr_t dest = { 0 };
-    dmip_addr_t unused_mask = { 0 };
+    dmroute_addr_t dest = { 0 };
+    dmroute_addr_t unused_mask = { 0 };
     if (!parse_destination(dest_str, &dest, &unused_mask))
     {
         Dmod_Printf("%s: invalid destination '%s'\n", prog, dest_str);
@@ -251,15 +250,15 @@ static int cmd_route_add(const char* prog, int argc, char* argv[])
         return 1;
     }
 
-    dmip_addr_t destination = { 0 };
-    dmip_addr_t netmask = { 0 };
+    dmroute_addr_t destination = { 0 };
+    dmroute_addr_t netmask = { 0 };
     if (!parse_destination(argv[1], &destination, &netmask))
     {
         Dmod_Printf("%s: invalid destination '%s'\n", prog, argv[1]);
         return 1;
     }
 
-    dmip_addr_t gateway = { 0 };
+    dmroute_addr_t gateway = { 0 };
     bool have_gateway = false;
     const char* iface_name = NULL;
     uint32_t metric = DMROUTE_DEFAULT_METRIC;
@@ -329,7 +328,7 @@ static int cmd_route_add(const char* prog, int argc, char* argv[])
  * pattern lib/dmnetif/tests/dmnetif_test.c uses. */
 static bool ipv4_bytes_equal(const uint8_t* a, const uint8_t* b)
 {
-    for (int i = 0; i < DMIP_IPV4_ADDR_LEN; i++)
+    for (int i = 0; i < DMROUTE_IPV4_ADDR_LEN; i++)
     {
         if (a[i] != b[i])
             return false;
@@ -344,8 +343,8 @@ static bool ipv4_bytes_equal(const uint8_t* a, const uint8_t* b)
  * is not the same thing). */
 typedef struct
 {
-    const dmip_addr_t* destination;
-    const dmip_addr_t* netmask;
+    const dmroute_addr_t* destination;
+    const dmroute_addr_t* netmask;
     const char*               iface_name;
     dmroute_route_t           found;
 } find_exact_ctx_t;
@@ -354,14 +353,14 @@ static bool find_exact_visitor(dmroute_route_t route, void* user_data)
 {
     find_exact_ctx_t* ctx = (find_exact_ctx_t*)user_data;
 
-    dmip_addr_t destination = { 0 };
-    dmip_addr_t netmask = { 0 };
+    dmroute_addr_t destination = { 0 };
+    dmroute_addr_t netmask = { 0 };
     dmroute_get_destination(route, &destination);
     dmroute_get_netmask(route, &netmask);
 
     const char* iface_name = dmroute_get_iface_name(route);
     bool iface_matches = (iface_name != NULL) && (strcmp(iface_name, ctx->iface_name) == 0);
-    bool family_matches = destination.family == dmip_family_v4;
+    bool family_matches = destination.family == dmroute_family_v4;
     bool addr_matches = family_matches && ipv4_bytes_equal(destination.addr.v4, ctx->destination->addr.v4);
     bool mask_matches = family_matches && ipv4_bytes_equal(netmask.addr.v4, ctx->netmask->addr.v4);
 
@@ -382,8 +381,8 @@ static int cmd_route_del(const char* prog, int argc, char* argv[])
         return 1;
     }
 
-    dmip_addr_t destination = { 0 };
-    dmip_addr_t netmask = { 0 };
+    dmroute_addr_t destination = { 0 };
+    dmroute_addr_t netmask = { 0 };
     if (!parse_destination(argv[1], &destination, &netmask))
     {
         Dmod_Printf("%s: invalid destination '%s'\n", prog, argv[1]);

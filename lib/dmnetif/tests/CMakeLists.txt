@@ -12,9 +12,9 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
 )
 
-# dmip:    dmip_addr_t, used directly to build test addresses
-# dmroute: verifies the connected-route side effect of
+# dmroute: dmroute_addr_t (used directly to build test addresses), and
+#          verifies the connected-route side effect of
 #          dmnetif_set_ip_address() directly against dmroute's own API
 #          (dmroute_lookup() etc.) - see the "connected route" test steps
 #          in dmnetif_test.c.
-target_link_libraries(${DMOD_MODULE_NAME} dmnetif_if dmip_if dmroute_if)
+target_link_libraries(${DMOD_MODULE_NAME} dmnetif_if dmroute_if)

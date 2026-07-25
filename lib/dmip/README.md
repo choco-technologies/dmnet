@@ -4,18 +4,19 @@
 
 dmip DMOD library module - the IP layer: building/parsing IPv4 and IPv6
 headers, the IPv4 header checksum, TTL/Hop-Limit handling, identification
-generation, and fragmentation/reassembly for both families. Also holds
-`dmip_addr_t`, the address type shared by [dmnetif](../dmnetif) and
-[dmroute](../dmroute) - see [docs/dmip.md](docs/dmip.md) for the full
-rationale.
+generation, fragmentation/reassembly for both families, and sending/
+receiving actual packets (route lookup via [dmroute](../dmroute), ARP via
+[dmarp](../dmarp), frame I/O via [dmnetif](../dmnetif)). `dmip_addr_t` is
+re-exported from dmroute, which owns the real definition - see
+[docs/dmip.md](docs/dmip.md) for the full rationale.
 
 ## Building
 
 This module lives under `lib/dmip` inside the `dmnet` repository and is
 built as part of the parent's CMake configure (the top-level
 `CMakeLists.txt` calls `add_subdirectory(lib)`, whose own `CMakeLists.txt`
-calls `add_subdirectory(dmip)` before the modules that depend on it) - it
-is not built standalone.
+calls `add_subdirectory(dmip)` after dmroute/dmnetif/dmarp, the modules it
+depends on) - it is not built standalone.
 
 ```bash
 mkdir -p build

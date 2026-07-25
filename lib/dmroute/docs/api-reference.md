@@ -10,9 +10,12 @@ this API's shape.
 | `dmroute_route_t`          | Opaque handle to one routing table entry                           |
 | `dmroute_origin_t`         | `dmroute_origin_static` \| `dmroute_origin_connected` - how a route came to exist |
 | `dmroute_iterator_func_t`  | `bool (*)(dmroute_route_t route, void* user_data)` - see `dmroute_for_each()` |
+| `dmroute_family_t`         | `dmroute_family_none` \| `_v4` \| `_v6`                             |
+| `dmroute_addr_t`           | `{ family; union { v4[DMROUTE_IPV4_ADDR_LEN]; v6[DMROUTE_IPV6_ADDR_LEN]; } addr; }` - one type for both IPv4 and IPv6, discriminated by `family` |
 
-All addresses (`destination`/`netmask`/`gateway`) use `dmip_addr_t` from
-[dmip](../../dmip), not a type of dmroute's own.
+All addresses (`destination`/`netmask`/`gateway`) use `dmroute_addr_t`,
+defined by dmroute itself (`dmip.h` re-exports the same type as
+`dmip_addr_t` for anything built on top of dmip).
 
 ## Add / remove
 
@@ -35,7 +38,7 @@ All addresses (`destination`/`netmask`/`gateway`) use `dmip_addr_t` from
 |-----------------------------------------------|-----------------------------------------------------------------------|
 | `dmroute_get_destination(route, destination)`| Destination network address (already masked with the route's netmask). |
 | `dmroute_get_netmask(route, netmask)`        | The route's netmask.                                                 |
-| `dmroute_get_gateway(route, gateway)`        | Next-hop gateway; `family` is `dmip_family_none` for a directly-connected/on-link route. |
+| `dmroute_get_gateway(route, gateway)`        | Next-hop gateway; `family` is `dmroute_family_none` for a directly-connected/on-link route. |
 | `dmroute_get_iface_name(route)`              | Egress interface name. Never validated by dmroute itself - resolve with `dmnetif_find_by_name()` before using it to send anything. |
 | `dmroute_get_metric(route)`                  | The route's metric.                                                  |
 | `dmroute_get_origin(route)`                  | `dmroute_origin_static` (added via an explicit `dmroute_add()` call) or `dmroute_origin_connected` (added by dmnetif because an interface got an IP address). |

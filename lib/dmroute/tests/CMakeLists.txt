@@ -12,6 +12,4 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
 )
 
-# dmip: dmip_addr_t, used directly to build test addresses (dmroute.h
-#       includes dmip.h - dmroute_if alone doesn't carry its include dir).
-target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmip_if)
+target_link_libraries(${DMOD_MODULE_NAME} dmroute_if)

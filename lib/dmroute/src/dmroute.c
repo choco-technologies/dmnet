@@ -30,9 +30,9 @@
 struct dmroute_entry
 {
     uint32_t                 magic;                                /**< Must equal DMROUTE_CONTEXT_MAGIC for this struct to be considered valid - see is_valid_route() */
-    dmip_addr_t               destination;                           /**< Destination network address, already masked with netmask */
-    dmip_addr_t               netmask;                                /**< Netmask for the destination network */
-    dmip_addr_t               gateway;                                 /**< Next-hop gateway; family is dmip_family_none for a directly-connected/on-link route */
+    dmroute_addr_t               destination;                           /**< Destination network address, already masked with netmask */
+    dmroute_addr_t               netmask;                                /**< Netmask for the destination network */
+    dmroute_addr_t               gateway;                                 /**< Next-hop gateway; family is dmroute_family_none for a directly-connected/on-link route */
     char                      iface_name[DMROUTE_IFACE_NAME_MAX_LEN + 1]; /**< Name of the egress interface (never resolved or validated by dmroute itself) */
     uint32_t                  metric;                                   /**< Tie-breaker among equally-specific matches - lower wins */
     dmroute_origin_t          origin;                                    /**< How this route came to exist */
@@ -82,11 +82,11 @@ static int compare_pointer(const void* data, const void* user_data)
  *
  * @param family Value to check
  *
- * @return true if family is dmip_family_v4 or _v6
+ * @return true if family is dmroute_family_v4 or _v6
  */
-static bool is_valid_ip_family(dmip_family_t family)
+static bool is_valid_ip_family(dmroute_family_t family)
 {
-    return family == dmip_family_v4 || family == dmip_family_v6;
+    return family == dmroute_family_v4 || family == dmroute_family_v6;
 }
 
 /**
@@ -94,14 +94,14 @@ static bool is_valid_ip_family(dmip_family_t family)
  *
  * @param family Address family
  *
- * @return DMIP_IPV4_ADDR_LEN, DMIP_IPV6_ADDR_LEN, or 0 for dmip_family_none
+ * @return DMROUTE_IPV4_ADDR_LEN, DMROUTE_IPV6_ADDR_LEN, or 0 for dmroute_family_none
  */
-static size_t addr_byte_length(dmip_family_t family)
+static size_t addr_byte_length(dmroute_family_t family)
 {
     switch (family)
     {
-        case dmip_family_v4: return DMIP_IPV4_ADDR_LEN;
-        case dmip_family_v6: return DMIP_IPV6_ADDR_LEN;
+        case dmroute_family_v4: return DMROUTE_IPV4_ADDR_LEN;
+        case dmroute_family_v6: return DMROUTE_IPV6_ADDR_LEN;
         default:             return 0;
     }
 }
@@ -111,11 +111,11 @@ static size_t addr_byte_length(dmip_family_t family)
  *
  * `ip` and `netmask` must be the same family; `out` is written with that
  * family and the masked bytes. `addr.v4`/`addr.v6` share the same leading
- * storage in dmip_addr_t's union, so indexing through `.addr.v6` up to
+ * storage in dmroute_addr_t's union, so indexing through `.addr.v6` up to
  * addr_byte_length(family) bytes is safe regardless of which member was
  * last written.
  */
-static void apply_mask(const dmip_addr_t* ip, const dmip_addr_t* netmask, dmip_addr_t* out)
+static void apply_mask(const dmroute_addr_t* ip, const dmroute_addr_t* netmask, dmroute_addr_t* out)
 {
     out->family = ip->family;
     size_t length = addr_byte_length(ip->family);
@@ -128,7 +128,7 @@ static void apply_mask(const dmip_addr_t* ip, const dmip_addr_t* netmask, dmip_a
 /**
  * @brief Compare two addresses of the same family for equality
  */
-static bool addr_equal(const dmip_addr_t* a, const dmip_addr_t* b)
+static bool addr_equal(const dmroute_addr_t* a, const dmroute_addr_t* b)
 {
     if (a->family != b->family)
         return false;
@@ -146,7 +146,7 @@ static bool addr_equal(const dmip_addr_t* a, const dmip_addr_t* b)
  * @brief Count the number of set bits in a netmask - used as the
  *        "specificity" of a route for longest-prefix-match comparison
  */
-static int netmask_prefix_length(const dmip_addr_t* netmask)
+static int netmask_prefix_length(const dmroute_addr_t* netmask)
 {
     size_t length = addr_byte_length(netmask->family);
     int bits = 0;
@@ -169,8 +169,8 @@ static int netmask_prefix_length(const dmip_addr_t* netmask)
  *
  * @return The new entry, or NULL on failure
  */
-static struct dmroute_entry* add_route(const dmip_addr_t* destination, const dmip_addr_t* netmask,
-                                        const dmip_addr_t* gateway, const char* iface_name,
+static struct dmroute_entry* add_route(const dmroute_addr_t* destination, const dmroute_addr_t* netmask,
+                                        const dmroute_addr_t* gateway, const char* iface_name,
                                         uint32_t metric, dmroute_origin_t origin)
 {
     if (destination == NULL || netmask == NULL || iface_name == NULL)
@@ -185,7 +185,7 @@ static struct dmroute_entry* add_route(const dmip_addr_t* destination, const dmi
         return NULL;
     }
 
-    if (gateway != NULL && gateway->family != dmip_family_none && gateway->family != destination->family)
+    if (gateway != NULL && gateway->family != dmroute_family_none && gateway->family != destination->family)
     {
         DMOD_LOG_ERROR("dmroute_add: gateway family does not match destination\n");
         return NULL;
@@ -199,7 +199,7 @@ static struct dmroute_entry* add_route(const dmip_addr_t* destination, const dmi
     entry->magic = DMROUTE_CONTEXT_MAGIC;
     entry->netmask = *netmask;
     apply_mask(destination, netmask, &entry->destination);
-    if (gateway != NULL && gateway->family != dmip_family_none)
+    if (gateway != NULL && gateway->family != dmroute_family_none)
     {
         entry->gateway = *gateway;
     }
@@ -276,7 +276,7 @@ int dmod_deinit(void)
 /**
  * @brief Implementation of dmroute_add() - see dmroute.h
  */
-dmod_dmroute_api_declaration(1.0, dmroute_route_t, _add, ( const dmip_addr_t* destination, const dmip_addr_t* netmask, const dmip_addr_t* gateway, const char* iface_name, uint32_t metric, dmroute_origin_t origin ))
+dmod_dmroute_api_declaration(1.0, dmroute_route_t, _add, ( const dmroute_addr_t* destination, const dmroute_addr_t* netmask, const dmroute_addr_t* gateway, const char* iface_name, uint32_t metric, dmroute_origin_t origin ))
 {
     return (dmroute_route_t)add_route(destination, netmask, gateway, iface_name, metric, origin);
 }
@@ -308,7 +308,7 @@ dmod_dmroute_api_declaration(1.0, void, _remove, ( dmroute_route_t route ))
  */
 typedef struct
 {
-    const dmip_addr_t*    destination;      /**< Address being looked up */
+    const dmroute_addr_t*    destination;      /**< Address being looked up */
     struct dmroute_entry* best;              /**< Best match found so far, or NULL */
     int                    best_prefix_len;   /**< netmask_prefix_length() of best - only meaningful if best != NULL */
 } lookup_ctx_t;
@@ -325,7 +325,7 @@ static bool lookup_visitor(void* data, void* user_data)
     if (entry->destination.family != ctx->destination->family)
         return true;
 
-    dmip_addr_t masked;
+    dmroute_addr_t masked;
     apply_mask(ctx->destination, &entry->netmask, &masked);
     if (!addr_equal(&masked, &entry->destination))
         return true;
@@ -345,7 +345,7 @@ static bool lookup_visitor(void* data, void* user_data)
 /**
  * @brief Implementation of dmroute_lookup() - see dmroute.h
  */
-dmod_dmroute_api_declaration(1.0, dmroute_route_t, _lookup, ( const dmip_addr_t* destination_ip ))
+dmod_dmroute_api_declaration(1.0, dmroute_route_t, _lookup, ( const dmroute_addr_t* destination_ip ))
 {
     if (destination_ip == NULL || !is_valid_ip_family(destination_ip->family))
         return NULL;
@@ -409,7 +409,7 @@ dmod_dmroute_api_declaration(1.0, void, _for_each, ( dmroute_iterator_func_t cal
 /**
  * @brief Implementation of dmroute_get_destination() - see dmroute.h
  */
-dmod_dmroute_api_declaration(1.0, int, _get_destination, ( dmroute_route_t route, dmip_addr_t* destination ))
+dmod_dmroute_api_declaration(1.0, int, _get_destination, ( dmroute_route_t route, dmroute_addr_t* destination ))
 {
     if (!is_valid_route(route) || destination == NULL)
         return -EINVAL;
@@ -421,7 +421,7 @@ dmod_dmroute_api_declaration(1.0, int, _get_destination, ( dmroute_route_t route
 /**
  * @brief Implementation of dmroute_get_netmask() - see dmroute.h
  */
-dmod_dmroute_api_declaration(1.0, int, _get_netmask, ( dmroute_route_t route, dmip_addr_t* netmask ))
+dmod_dmroute_api_declaration(1.0, int, _get_netmask, ( dmroute_route_t route, dmroute_addr_t* netmask ))
 {
     if (!is_valid_route(route) || netmask == NULL)
         return -EINVAL;
@@ -433,7 +433,7 @@ dmod_dmroute_api_declaration(1.0, int, _get_netmask, ( dmroute_route_t route, dm
 /**
  * @brief Implementation of dmroute_get_gateway() - see dmroute.h
  */
-dmod_dmroute_api_declaration(1.0, int, _get_gateway, ( dmroute_route_t route, dmip_addr_t* gateway ))
+dmod_dmroute_api_declaration(1.0, int, _get_gateway, ( dmroute_route_t route, dmroute_addr_t* gateway ))
 {
     if (!is_valid_route(route) || gateway == NULL)
         return -EINVAL;

@@ -1,0 +1,308 @@
+/**
+ * @file dmudp.c
+ * @brief DMOD UDP - Implementation
+ *
+ * Stateless: every function here is a one-shot build+checksum+send or a
+ * one-shot poll+parse+verify - no globals, no registry, matching dmip.c's
+ * own "Send / Receive" section this is built directly on top of.
+ *
+ * Segments are built/parsed as raw byte buffers rather than packed C
+ * structs, same reasoning as dmip.c/dmarp.c (dmod's minimal module
+ * runtime gives no struct-packing guarantee).
+ *
+ * The IPv4/IPv6 pseudo-header (RFC 768 / RFC 8200 8.1) is never
+ * transmitted on its own - it only exists to be summed alongside the
+ * segment. Both _send() and _checksum_valid() build one buffer shaped
+ * [pseudo-header][segment], run dmip_checksum() over the whole thing, and
+ * (for _send()) reuse the segment portion of that same buffer as the
+ * payload handed to dmip_v4_send() - no separate copy needed.
+ */
+#define DMOD_ENABLE_REGISTRATION    ON
+#include "dmod.h"
+#include "dmudp.h"
+#include <string.h>
+#include <errno.h>
+
+#define DMUDP_V4_PSEUDO_HEADER_LEN 12u
+#define DMUDP_V6_PSEUDO_HEADER_LEN 40u
+
+static void write_u16_be(uint8_t* p, uint16_t value)
+{
+    p[0] = (uint8_t)(value >> 8);
+    p[1] = (uint8_t)(value & 0xFFu);
+}
+
+static uint16_t read_u16_be(const uint8_t* p)
+{
+    return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+}
+
+/**
+ * @brief Write the 12-byte IPv4 pseudo-header (RFC 768) into `buf`
+ */
+static void write_v4_pseudo_header(uint8_t* buf, const dmip_addr_t* src_ip, const dmip_addr_t* dst_ip, uint16_t udp_length)
+{
+    memcpy(&buf[0], src_ip->addr.v4, DMIP_IPV4_ADDR_LEN);
+    memcpy(&buf[4], dst_ip->addr.v4, DMIP_IPV4_ADDR_LEN);
+    buf[8] = 0;
+    buf[9] = DMIP_PROTO_UDP;
+    write_u16_be(&buf[10], udp_length);
+}
+
+/**
+ * @brief Write the 40-byte IPv6 pseudo-header (RFC 8200 8.1) into `buf`
+ */
+static void write_v6_pseudo_header(uint8_t* buf, const dmip_addr_t* src_ip, const dmip_addr_t* dst_ip, uint32_t udp_length)
+{
+    memcpy(&buf[0], src_ip->addr.v6, DMIP_IPV6_ADDR_LEN);
+    memcpy(&buf[16], dst_ip->addr.v6, DMIP_IPV6_ADDR_LEN);
+    buf[32] = (uint8_t)(udp_length >> 24);
+    buf[33] = (uint8_t)(udp_length >> 16);
+    buf[34] = (uint8_t)(udp_length >> 8);
+    buf[35] = (uint8_t)(udp_length & 0xFFu);
+    buf[36] = 0;
+    buf[37] = 0;
+    buf[38] = 0;
+    buf[39] = DMIP_PROTO_UDP;
+}
+
+/**
+ * @brief Implementation of dmudp_v4_checksum_valid() - see dmudp.h
+ */
+dmod_dmudp_api_declaration(1.0, bool, _v4_checksum_valid, ( const dmip_addr_t* src_ip, const dmip_addr_t* dst_ip, const uint8_t* segment, size_t segment_len ))
+{
+    if (src_ip == NULL || dst_ip == NULL || segment == NULL || segment_len < DMUDP_HEADER_LEN)
+        return false;
+    if (src_ip->family != dmip_family_v4 || dst_ip->family != dmip_family_v4)
+        return false;
+
+    size_t total = DMUDP_V4_PSEUDO_HEADER_LEN + segment_len;
+    uint8_t* buf = Dmod_Malloc(total);
+    if (buf == NULL)
+        return false;
+
+    write_v4_pseudo_header(buf, src_ip, dst_ip, (uint16_t)segment_len);
+    memcpy(buf + DMUDP_V4_PSEUDO_HEADER_LEN, segment, segment_len);
+
+    bool valid = dmip_checksum(buf, total) == 0;
+    Dmod_Free(buf);
+    return valid;
+}
+
+/**
+ * @brief Implementation of dmudp_v6_checksum_valid() - see dmudp.h
+ */
+dmod_dmudp_api_declaration(1.0, bool, _v6_checksum_valid, ( const dmip_addr_t* src_ip, const dmip_addr_t* dst_ip, const uint8_t* segment, size_t segment_len ))
+{
+    if (src_ip == NULL || dst_ip == NULL || segment == NULL || segment_len < DMUDP_HEADER_LEN)
+        return false;
+    if (src_ip->family != dmip_family_v6 || dst_ip->family != dmip_family_v6)
+        return false;
+
+    size_t total = DMUDP_V6_PSEUDO_HEADER_LEN + segment_len;
+    uint8_t* buf = Dmod_Malloc(total);
+    if (buf == NULL)
+        return false;
+
+    write_v6_pseudo_header(buf, src_ip, dst_ip, (uint32_t)segment_len);
+    memcpy(buf + DMUDP_V6_PSEUDO_HEADER_LEN, segment, segment_len);
+
+    bool valid = dmip_checksum(buf, total) == 0;
+    Dmod_Free(buf);
+    return valid;
+}
+
+/**
+ * @brief Implementation of dmudp_send() - see dmudp.h
+ *
+ * No separate dmudp_v4_send()/_v6_send(): a caller only ever has one
+ * `dst_ip`, already carrying the family that decides everything else
+ * here, so a second, function-name-level choice on top of that would be
+ * pure redundancy - see dmip_send()'s own doc comment for the same
+ * reasoning one layer down.
+ */
+dmod_dmudp_api_declaration(1.0, int, _send, ( const dmip_addr_t* dst_ip, uint16_t dst_port, uint16_t src_port, const void* payload, size_t payload_len, uint32_t arp_timeout_ms ))
+{
+    if (dst_ip == NULL || (payload == NULL && payload_len > 0))
+        return -EINVAL;
+
+    if (dst_ip->family == dmip_family_v6)
+    {
+        /* No IPv6 send path yet - blocked on dmip_send()'s own
+         * dmip_family_v6 case, itself blocked on there being no NDP
+         * module (see dmudp.h's file comment). */
+        return -ENOSYS;
+    }
+
+    if (dst_ip->family != dmip_family_v4)
+        return -EINVAL;
+
+    dmip_addr_t src_ip = { 0 };
+    int result = dmip_v4_get_source_address(dst_ip, &src_ip);
+    if (result != 0)
+        return result;
+
+    size_t udp_len = DMUDP_HEADER_LEN + payload_len;
+    size_t total = DMUDP_V4_PSEUDO_HEADER_LEN + udp_len;
+    uint8_t* buf = Dmod_Malloc(total);
+    if (buf == NULL)
+        return -ENOMEM;
+
+    write_v4_pseudo_header(buf, &src_ip, dst_ip, (uint16_t)udp_len);
+
+    uint8_t* segment = buf + DMUDP_V4_PSEUDO_HEADER_LEN;
+    write_u16_be(&segment[0], src_port);
+    write_u16_be(&segment[2], dst_port);
+    write_u16_be(&segment[4], (uint16_t)udp_len);
+    write_u16_be(&segment[6], 0);
+    if (payload_len > 0)
+        memcpy(&segment[DMUDP_HEADER_LEN], payload, payload_len);
+
+    uint16_t checksum = dmip_checksum(buf, total);
+    write_u16_be(&segment[6], (checksum == 0) ? 0xFFFFu : checksum); /* RFC 768: 0 means "no checksum" */
+
+    dmip_header_t header = { 0 };
+    header.family = dmip_family_v4;
+    header.header.v4.ttl = DMIP_DEFAULT_TTL;
+    header.header.v4.protocol = DMIP_PROTO_UDP;
+    header.header.v4.identification = dmip_v4_next_identification();
+    header.header.v4.src = src_ip;
+    header.header.v4.dst = *dst_ip;
+
+    result = dmip_send(&header, segment, udp_len, arp_timeout_ms);
+
+    Dmod_Free(buf);
+    return result;
+}
+
+/**
+ * @brief Copy a UDP segment's payload out and read its ports, once the
+ *        caller has already verified `segment` is at least
+ *        DMUDP_HEADER_LEN bytes and passed checksum verification
+ *
+ * Shared tail of dmudp_receive()'s two family branches - the only thing
+ * that differs between them is how `segment` was obtained (IPv4 vs IPv6
+ * packet, checksum-skip-on-zero vs always-verified).
+ */
+static int extract_udp_datagram(const uint8_t* segment, size_t segment_len, uint16_t* out_src_port, uint16_t* out_dst_port, uint8_t** out_payload, size_t* out_payload_len)
+{
+    size_t payload_len = segment_len - DMUDP_HEADER_LEN;
+    uint8_t* payload = NULL;
+    if (payload_len > 0)
+    {
+        payload = Dmod_Malloc(payload_len);
+        if (payload == NULL)
+            return -ENOMEM;
+        memcpy(payload, segment + DMUDP_HEADER_LEN, payload_len);
+    }
+
+    *out_src_port = read_u16_be(&segment[0]);
+    *out_dst_port = read_u16_be(&segment[2]);
+    *out_payload = payload;
+    *out_payload_len = payload_len;
+    return 0;
+}
+
+/**
+ * @brief Implementation of dmudp_receive() - see dmudp.h
+ *
+ * No separate dmudp_v4_receive()/_v6_receive() (same reasoning as
+ * dmudp_send() not having a per-family split): built on dmip_receive(),
+ * a single dmnetif_receive() call covering either family, rather than
+ * two per-family calls that would each risk silently dropping a frame of
+ * the *other* family (dmnetif_receive() hands back whichever frame is
+ * pending regardless of its ethertype, and there's no way to put a
+ * consumed frame back).
+ */
+dmod_dmudp_api_declaration(1.0, int, _receive, ( dmnetif_iface_t iface, dmip_family_t* out_family, dmip_addr_t* out_src_ip, uint16_t* out_src_port, uint16_t* out_dst_port, uint8_t** out_payload, size_t* out_payload_len ))
+{
+    if (iface == NULL || out_family == NULL || out_src_ip == NULL || out_src_port == NULL || out_dst_port == NULL || out_payload == NULL || out_payload_len == NULL)
+        return -EINVAL;
+
+    uint8_t* ip_packet = NULL;
+    size_t ip_packet_len = 0;
+    dmip_family_t family = dmip_family_none;
+    int result = dmip_receive(iface, &family, &ip_packet, &ip_packet_len);
+    if (result != 0)
+        return result;
+
+    const uint8_t* segment = NULL;
+    size_t segment_len = 0;
+
+    if (family == dmip_family_v4)
+    {
+        dmip_v4_header_t ip_header = { 0 };
+        size_t header_len = 0;
+        result = dmip_v4_parse_header(ip_packet, ip_packet_len, &ip_header, &header_len);
+        if (result != 0 || ip_header.protocol != DMIP_PROTO_UDP)
+        {
+            Dmod_Free(ip_packet);
+            return (result != 0) ? result : -EPROTO;
+        }
+
+        segment = ip_packet + header_len;
+        segment_len = ip_packet_len - header_len;
+        if (segment_len < DMUDP_HEADER_LEN)
+        {
+            Dmod_Free(ip_packet);
+            return -EPROTO;
+        }
+
+        uint16_t wire_checksum = read_u16_be(&segment[6]);
+        if (wire_checksum != 0 && !dmudp_v4_checksum_valid(&ip_header.src, &ip_header.dst, segment, segment_len))
+        {
+            Dmod_Free(ip_packet);
+            return -EBADMSG;
+        }
+
+        *out_src_ip = ip_header.src;
+    }
+    else /* dmip_family_v6 */
+    {
+        dmip_v6_header_t ip_header = { 0 };
+        result = dmip_v6_parse_header(ip_packet, ip_packet_len, &ip_header);
+        if (result != 0 || ip_header.next_header != DMIP_PROTO_UDP)
+        {
+            Dmod_Free(ip_packet);
+            return (result != 0) ? result : -EPROTO;
+        }
+
+        segment = ip_packet + DMIP_V6_HEADER_LEN;
+        segment_len = ip_packet_len - DMIP_V6_HEADER_LEN;
+        if (segment_len < DMUDP_HEADER_LEN)
+        {
+            Dmod_Free(ip_packet);
+            return -EPROTO;
+        }
+
+        if (!dmudp_v6_checksum_valid(&ip_header.src, &ip_header.dst, segment, segment_len))
+        {
+            Dmod_Free(ip_packet);
+            return -EBADMSG;
+        }
+
+        *out_src_ip = ip_header.src;
+    }
+
+    result = extract_udp_datagram(segment, segment_len, out_src_port, out_dst_port, out_payload, out_payload_len);
+    if (result == 0)
+    {
+        *out_family = family;
+    }
+
+    Dmod_Free(ip_packet);
+    return result;
+}
+
+/* ---- DMOD lifecycle ---- */
+
+int dmod_init(const Dmod_Config_t *Config)
+{
+    (void)Config;
+    return 0;
+}
+
+int dmod_deinit(void)
+{
+    return 0;
+}

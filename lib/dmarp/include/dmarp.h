@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include "dmip.h"
+#include "dmroute.h"
 #include "dmnetif.h"
 #include "dmarp_defs.h"
 
@@ -25,13 +25,14 @@ extern "C" {
  *
  * IPv6 is out of scope: IPv6 neighbor discovery uses NDP (over ICMPv6),
  * not ARP, so every function here only ever deals with
- * dmip_family_v4 addresses.
+ * dmroute_family_v4 addresses.
  *
  * dmarp depends on dmnetif (to send/receive frames and read an
- * interface's own MAC/IP address) and dmip (for dmip_addr_t) - nothing
- * depends on dmarp, so this is a plain one-way dependency, not a DIF/MAL.
- * There is exactly one ARP cache per system - functions here are plain
- * Built-in API (dmod_dmarp_api).
+ * interface's own MAC/IP address) and dmroute (for dmroute_addr_t) -
+ * dmip depends on dmarp in turn (to resolve a destination MAC before
+ * sending), not the other way around, so this stays a plain one-way
+ * dependency chain, not a DIF/MAL. There is exactly one ARP cache per
+ * system - functions here are plain Built-in API (dmod_dmarp_api).
  */
 
 /**
@@ -76,20 +77,20 @@ extern "C" {
  *                    dmnetif_send() silently fails (see its own docs) on
  *                    a down interface, which dmarp_resolve() reports as
  *                    -EIO rather than waiting out the timeout for nothing.
- * @param ip         Address to resolve (family must be dmip_family_v4)
+ * @param ip         Address to resolve (family must be dmroute_family_v4)
  * @param mac        Output buffer for the resolved MAC address
  * @param timeout_ms Milliseconds to wait for a reply on a cache miss (use
  *                    DMARP_DEFAULT_TIMEOUT_MS if you don't have a strong
  *                    opinion)
  *
  * @return 0 on success, negative errno on failure:
- *         -EINVAL    NULL argument or `ip->family` is not dmip_family_v4
+ *         -EINVAL    NULL argument or `ip->family` is not dmroute_family_v4
  *         -ENODEV    `iface` is not a valid, currently registered interface
  *         -EIO       the request could not be sent (interface down, or
  *                    the driver rejected the frame)
  *         -ETIMEDOUT no matching reply arrived within `timeout_ms`
  */
-dmod_dmarp_api(1.0, int, _resolve, ( dmnetif_iface_t iface, const dmip_addr_t* ip, dmnetif_mac_addr_t* mac, uint32_t timeout_ms ));
+dmod_dmarp_api(1.0, int, _resolve, ( dmnetif_iface_t iface, const dmroute_addr_t* ip, dmnetif_mac_addr_t* mac, uint32_t timeout_ms ));
 
 /* ============================================================================
  *                      Cache
@@ -106,13 +107,13 @@ dmod_dmarp_api(1.0, int, _resolve, ( dmnetif_iface_t iface, const dmip_addr_t* i
  * explicit about intent).
  *
  * @param iface Interface the entry would have been cached against
- * @param ip    Address to look up (family must be dmip_family_v4)
+ * @param ip    Address to look up (family must be dmroute_family_v4)
  * @param mac   Output buffer for the cached MAC address
  *
  * @return true if a non-expired cache entry was found (and `mac` filled
  *         in), false otherwise (including invalid arguments)
  */
-dmod_dmarp_api(1.0, bool, _cache_lookup, ( dmnetif_iface_t iface, const dmip_addr_t* ip, dmnetif_mac_addr_t* mac ));
+dmod_dmarp_api(1.0, bool, _cache_lookup, ( dmnetif_iface_t iface, const dmroute_addr_t* ip, dmnetif_mac_addr_t* mac ));
 
 /**
  * @brief Add or replace a cache entry
@@ -124,10 +125,10 @@ dmod_dmarp_api(1.0, bool, _cache_lookup, ( dmnetif_iface_t iface, const dmip_add
  * entry - see its doc comment.
  *
  * @param iface Interface to cache the entry against
- * @param ip    Address to cache (family must be dmip_family_v4)
+ * @param ip    Address to cache (family must be dmroute_family_v4)
  * @param mac   MAC address to associate with `ip`
  */
-dmod_dmarp_api(1.0, void, _cache_insert, ( dmnetif_iface_t iface, const dmip_addr_t* ip, const dmnetif_mac_addr_t* mac ));
+dmod_dmarp_api(1.0, void, _cache_insert, ( dmnetif_iface_t iface, const dmroute_addr_t* ip, const dmnetif_mac_addr_t* mac ));
 
 /**
  * @brief Remove one cache entry, if present
@@ -139,7 +140,7 @@ dmod_dmarp_api(1.0, void, _cache_insert, ( dmnetif_iface_t iface, const dmip_add
  * @param iface Interface the entry was cached against
  * @param ip    Address to forget
  */
-dmod_dmarp_api(1.0, void, _cache_remove, ( dmnetif_iface_t iface, const dmip_addr_t* ip ));
+dmod_dmarp_api(1.0, void, _cache_remove, ( dmnetif_iface_t iface, const dmroute_addr_t* ip ));
 
 /**
  * @brief Number of entries currently in the cache (expired or not)

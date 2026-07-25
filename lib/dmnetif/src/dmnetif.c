@@ -9,9 +9,9 @@
  * docs/dmnetif.md for the full rationale.
  *
  * Also keeps each interface's directly-connected route in dmroute up to
- * date (see update_connected_route()) - dmnetif depends on dmroute
- * directly for this, and on dmip for the shared dmip_addr_t type both
- * modules use, so neither has to depend on the other.
+ * date (see update_connected_route()) - dmnetif depends on dmroute both
+ * for this and for the shared dmroute_addr_t type its own IP/netmask/
+ * broadcast fields use.
  *
  * No real network driver exercises this yet - dmeth doesn't call
  * dmnetif_register() from its dmdrvi_path_ready() implementation yet (see
@@ -48,9 +48,9 @@ struct dmnetif_iface
     char*              device_path;                    /**< Dmod_StrDup()'d copy of the devfs path passed to dmnetif_register() */
     void*              file;                            /**< Handle returned by Dmod_FileOpen(device_path, "r+"), kept open for the interface's lifetime */
     bool               up;                               /**< Whether dmnetif_up() has been applied without a matching dmnetif_down() since */
-    dmip_addr_t        ip;                                /**< Currently assigned IP address; family is dmip_family_none until dmnetif_set_ip_address() is called */
-    dmip_addr_t        netmask;                            /**< Currently assigned netmask; family is dmip_family_none until dmnetif_set_netmask() is called */
-    dmip_addr_t        broadcast;                           /**< Currently assigned broadcast address; family is dmip_family_none until dmnetif_set_broadcast() is called */
+    dmroute_addr_t        ip;                                /**< Currently assigned IP address; family is dmroute_family_none until dmnetif_set_ip_address() is called */
+    dmroute_addr_t        netmask;                            /**< Currently assigned netmask; family is dmroute_family_none until dmnetif_set_netmask() is called */
+    dmroute_addr_t        broadcast;                           /**< Currently assigned broadcast address; family is dmroute_family_none until dmnetif_set_broadcast() is called */
     uint16_t           mtu;                                  /**< MTU in bytes; DMNETIF_DEFAULT_MTU until dmnetif_set_mtu() is called */
     dmnetif_stats_t    stats;                                 /**< Packet counters, updated by dmnetif_send()/_receive() */
     dmroute_route_t    connected_route;                        /**< This interface's directly-connected route in dmroute, or NULL if it currently has none - see update_connected_route() */
@@ -131,13 +131,13 @@ static int compare_pointer(const void* data, const void* user_data)
  *
  * @param family Value to check
  *
- * @return true if family is dmip_family_none/_v4/_v6
+ * @return true if family is dmroute_family_none/_v4/_v6
  */
-static bool is_valid_ip_family(dmip_family_t family)
+static bool is_valid_ip_family(dmroute_family_t family)
 {
-    return family == dmip_family_none ||
-           family == dmip_family_v4 ||
-           family == dmip_family_v6;
+    return family == dmroute_family_none ||
+           family == dmroute_family_v4 ||
+           family == dmroute_family_v6;
 }
 
 /**
@@ -165,10 +165,10 @@ static void update_connected_route(struct dmnetif_iface* iface)
     dmroute_remove(iface->connected_route);
     iface->connected_route = NULL;
 
-    if (iface->ip.family == dmip_family_none)
+    if (iface->ip.family == dmroute_family_none)
         return;
 
-    dmip_addr_t netmask = iface->netmask;
+    dmroute_addr_t netmask = iface->netmask;
     if (netmask.family != iface->ip.family)
     {
         netmask.family = iface->ip.family;
@@ -518,7 +518,7 @@ dmod_dmnetif_api_declaration(1.0, int, _set_mac_address, ( dmnetif_iface_t iface
 /**
  * @brief Implementation of dmnetif_get_ip_address() - see dmnetif.h
  */
-dmod_dmnetif_api_declaration(1.0, int, _get_ip_address, ( dmnetif_iface_t iface, dmip_addr_t* ip ))
+dmod_dmnetif_api_declaration(1.0, int, _get_ip_address, ( dmnetif_iface_t iface, dmroute_addr_t* ip ))
 {
     if (!is_valid_iface(iface) || ip == NULL)
         return -EINVAL;
@@ -530,7 +530,7 @@ dmod_dmnetif_api_declaration(1.0, int, _get_ip_address, ( dmnetif_iface_t iface,
 /**
  * @brief Implementation of dmnetif_set_ip_address() - see dmnetif.h
  */
-dmod_dmnetif_api_declaration(1.0, int, _set_ip_address, ( dmnetif_iface_t iface, const dmip_addr_t* ip ))
+dmod_dmnetif_api_declaration(1.0, int, _set_ip_address, ( dmnetif_iface_t iface, const dmroute_addr_t* ip ))
 {
     if (!is_valid_iface(iface) || ip == NULL)
         return -EINVAL;
@@ -550,7 +550,7 @@ dmod_dmnetif_api_declaration(1.0, int, _set_ip_address, ( dmnetif_iface_t iface,
 /**
  * @brief Implementation of dmnetif_get_netmask() - see dmnetif.h
  */
-dmod_dmnetif_api_declaration(1.0, int, _get_netmask, ( dmnetif_iface_t iface, dmip_addr_t* netmask ))
+dmod_dmnetif_api_declaration(1.0, int, _get_netmask, ( dmnetif_iface_t iface, dmroute_addr_t* netmask ))
 {
     if (!is_valid_iface(iface) || netmask == NULL)
         return -EINVAL;
@@ -562,7 +562,7 @@ dmod_dmnetif_api_declaration(1.0, int, _get_netmask, ( dmnetif_iface_t iface, dm
 /**
  * @brief Implementation of dmnetif_set_netmask() - see dmnetif.h
  */
-dmod_dmnetif_api_declaration(1.0, int, _set_netmask, ( dmnetif_iface_t iface, const dmip_addr_t* netmask ))
+dmod_dmnetif_api_declaration(1.0, int, _set_netmask, ( dmnetif_iface_t iface, const dmroute_addr_t* netmask ))
 {
     if (!is_valid_iface(iface) || netmask == NULL)
         return -EINVAL;
@@ -580,7 +580,7 @@ dmod_dmnetif_api_declaration(1.0, int, _set_netmask, ( dmnetif_iface_t iface, co
 /**
  * @brief Implementation of dmnetif_get_broadcast() - see dmnetif.h
  */
-dmod_dmnetif_api_declaration(1.0, int, _get_broadcast, ( dmnetif_iface_t iface, dmip_addr_t* broadcast ))
+dmod_dmnetif_api_declaration(1.0, int, _get_broadcast, ( dmnetif_iface_t iface, dmroute_addr_t* broadcast ))
 {
     if (!is_valid_iface(iface) || broadcast == NULL)
         return -EINVAL;
@@ -592,7 +592,7 @@ dmod_dmnetif_api_declaration(1.0, int, _get_broadcast, ( dmnetif_iface_t iface, 
 /**
  * @brief Implementation of dmnetif_set_broadcast() - see dmnetif.h
  */
-dmod_dmnetif_api_declaration(1.0, int, _set_broadcast, ( dmnetif_iface_t iface, const dmip_addr_t* broadcast ))
+dmod_dmnetif_api_declaration(1.0, int, _set_broadcast, ( dmnetif_iface_t iface, const dmroute_addr_t* broadcast ))
 {
     if (!is_valid_iface(iface) || broadcast == NULL)
         return -EINVAL;

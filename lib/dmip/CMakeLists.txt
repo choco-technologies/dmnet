@@ -31,6 +31,23 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# dmroute, dmnetif, dmarp: in-tree siblings under dmnet/lib (added earlier
+# via the top-level add_subdirectory(lib), in the order dmroute -> dmnetif
+# -> dmarp -> dmip - see dmnet/CMakeLists.txt and lib/CMakeLists.txt), not
+# separately published modules, so they're linked directly rather than
+# through dmod_link_modules() (which fetches a *released* module's headers
+# via dmf-get and would fail here since none of them has such a release) -
+# same convention tools/ifconfig/CMakeLists.txt uses for dmnetif.
+#   dmroute: dmroute_addr_t (re-exported as dmip_addr_t - see dmip.h), and
+#            dmroute_lookup() to pick an egress interface/gateway when
+#            sending - see dmip_v4_send()/_get_source_address() in src/dmip.c
+#   dmnetif: dmnetif_send()/_receive() for actual frame I/O, dmnetif_get_mtu()
+#            to size fragments, dmnetif_get_ip_address() for source address
+#            selection
+#   dmarp:   dmarp_resolve() to find the next-hop MAC before dmip_v4_send()
+#            builds an Ethernet frame
+target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if dmarp_if)
+
 # dmlist: backs the fragment reassembly table
 # dmosi:  mutexes guarding reassembly/identification state, plus
 #         dmosi_get_tick_count() for reassembly timeouts - see

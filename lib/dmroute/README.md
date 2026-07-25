@@ -7,19 +7,20 @@ Every [dmnetif](../dmnetif) interface reports itself here automatically as
 soon as it's assigned an IP address (dmnetif calls `dmroute_add()`/
 `_remove()` directly - see
 [docs/dmroute.md](docs/dmroute.md#automatic-registration)); dmroute itself
-has no dependency on dmnetif at all, only on [dmip](../dmip) for the
-shared address type. Anything else (a TCP/IP stack, static config, the
-`ip` CLI) can add further routes through `dmroute_add()` and ask "which
-interface should this destination go through" with `dmroute_lookup()`.
+has no dependency on any other in-tree module - it owns `dmroute_addr_t`,
+the address type dmnetif/dmarp/dmip all build on. Anything else (a TCP/IP
+stack, static config, the `ip` CLI) can add further routes through
+`dmroute_add()` and ask "which interface should this destination go
+through" with `dmroute_lookup()`.
 
 ## Building
 
 This module lives under `lib/dmroute` inside the `dmnet` repository and is
 built as part of the parent's CMake configure (the top-level
 `CMakeLists.txt` calls `add_subdirectory(lib)`, whose own `CMakeLists.txt`
-calls `add_subdirectory(dmroute)` after `add_subdirectory(dmip)` but
-before `add_subdirectory(dmnetif)` - dmnetif is the one that depends on
-dmroute, not the other way around) - it is not built standalone.
+calls `add_subdirectory(dmroute)` first, before any other lib module -
+dmroute has no dependency on anything else in this tree) - it is not built
+standalone.
 
 ```bash
 mkdir -p build
