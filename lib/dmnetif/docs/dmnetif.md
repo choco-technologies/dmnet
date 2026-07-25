@@ -78,6 +78,19 @@ bolted on later. `dmnetif_set_broadcast()` is the one exception that's
 already wired up end to end: `ifconfig <iface> broadcast <addr>` calls it
 directly.
 
+`dmnetif_set_ip_address()` also keeps the interface's directly-connected
+route in [dmroute](../../dmroute) in sync, by calling `dmroute_add()`/
+`_remove()` directly (see `update_connected_route()` in `src/dmnetif.c`).
+dmnetif depends on dmroute for this the same ordinary way it depends on
+`dmlist` or `dmosi` - not through a DIF/MAL - since a routing table is
+always wanted alongside an interface registry, not an optional/pluggable
+extra. IP addresses themselves use `dmip_addr_t` (see
+[dmip](../../dmip)) rather than a type of dmnetif's own, since dmroute
+needs the exact same shape and the two modules must not depend on each
+other's headers (dmnetif -> dmroute already goes one way; dmroute ->
+dmnetif would make it a cycle). See `dmroute/docs/dmroute.md`'s
+"Automatic registration" section for what dmroute does with each call.
+
 ## MTU
 
 Same story as the IP address: an MTU is a concept dmnetif tracks for
@@ -119,6 +132,11 @@ one intentionally does not.
 
 ## Dependencies
 
+- `dmip` - the shared `dmip_addr_t` type used for every IP address/
+  netmask/broadcast field
+- `dmroute` - `dmnetif_set_ip_address()` calls `dmroute_add()`/`_remove()`
+  directly to keep an interface's connected route in sync (see the "IP
+  address" section above)
 - `dmdrvi` - generic driver interface (open/close/read/write/ioctl,
   `DMDRVI_IOCTL_NET_*` commands) used internally to talk to the device
   a driver registered

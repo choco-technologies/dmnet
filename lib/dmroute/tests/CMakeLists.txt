@@ -1,0 +1,17 @@
+set(DMOD_MODULE_NAME        test_dmroute)
+set(DMOD_MODULE_VERSION     ${PROJECT_VERSION})
+set(DMOD_AUTHOR_NAME        "Patryk Kubiak")
+set(DMOD_STACK_SIZE         1024)
+set(DMOD_PRIORITY           0)
+
+dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
+    dmroute_test.c
+)
+
+target_include_directories(${DMOD_MODULE_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+)
+
+# dmip: dmip_addr_t, used directly to build test addresses (dmroute.h
+#       includes dmip.h - dmroute_if alone doesn't carry its include dir).
+target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmip_if)

@@ -29,6 +29,8 @@ dmod_add_executable(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
 # published module, so it's linked directly rather than through
 # dmod_link_modules() (which fetches a *released* module's headers via
 # dmf-get and would fail here since dmnetif has no such release).
-target_link_libraries(${DMOD_MODULE_NAME} dmnetif_if)
+# dmip: dmip_addr_t, the type dmnetif's IP/netmask/broadcast fields use -
+#       dmnetif_if alone doesn't carry dmip's include dir.
+target_link_libraries(${DMOD_MODULE_NAME} dmnetif_if dmip_if)
 
 add_subdirectory(tests)

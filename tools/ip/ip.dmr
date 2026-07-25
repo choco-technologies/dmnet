@@ -1,0 +1,45 @@
+# DMOD Resource File for ip
+# This file specifies where resources should be installed
+#
+# ip lives nested under dmnet/tools/ip rather than being its own top-level
+# repo, so ${repo_dir}/${build_dir} below (which always resolve to the
+# dmnet repo/build root, not this subdirectory) are prefixed with
+# tools/ip - same convention tools/ifconfig/ifconfig.dmr uses.
+
+# === Core Module ===
+# Main module file - always installed
+dmf=./${module}.dmf => ${destination}/${module}.dmf [origin=${dmf_dir}/${module}.dmf]
+
+# Compressed module
+dmfc=./${module}.dmfc => ${destination}/${module}.dmfc [origin=${build_dir}/dmfc/${module}.dmfc]
+
+# Dependencies file (if exists)
+dmd=./${module}.dmd => ${destination}/${module}.dmd [origin=${dmf_dir}/${module}.dmd]
+
+# Version information
+version=./${module}_version.txt => ${destination}/${module}_version.txt [origin=${dmf_dir}/${module}_version.txt]
+
+# === Documentation ===
+# Module documentation in markdown format for dmf-man tool
+docs=./docs => ${destination}/${module}/docs [origin=${repo_dir}/tools/ip/docs]
+
+# README file
+readme=./README.md => ${destination}/${module}/README.md [origin=${repo_dir}/tools/ip/README.md]
+
+# === Header Files ===
+# No committed include/ dir of its own (its API is dmroute's, see
+# lib/dmroute) - just the generated module definitions header every DMOD
+# module gets, so dmf-man/consumers can still see it. Destination must be a
+# full *file* path (not a bare "include" dir) since there's no separate
+# directory-origin here to tell the packaging tool to treat it as one - see
+# lib/dmnetif/dmnetif.dmr's inc= entry for the directory+file combined case,
+# and tools/ifconfig/ifconfig.dmr for this same single-file convention.
+inc=./include/${module}_defs.h => ${destination}/${module}/include/${module}_defs.h [origin=${build_dir}/tools/ip/${module}_defs.h]
+
+# === License ===
+# License file - shared at the dmnet repo root (see lib/dmnetif/dmnetif.dmr
+# for the same "nested module shares the parent repo's LICENSE" convention)
+license=./LICENSE => ${destination}/${module}/LICENSE [origin=${repo_dir}/LICENSE]
+
+# Adding itself
+dmr=./${module}.dmr => ${destination}/${module}/${module}.dmr [origin=${repo_dir}/tools/ip/${module}.dmr]

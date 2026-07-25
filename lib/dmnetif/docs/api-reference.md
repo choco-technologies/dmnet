@@ -9,8 +9,8 @@ API's shape.
 |----------------------------|---------------------------------------------------------------------|
 | `dmnetif_iface_t`          | Opaque handle to one registered network interface                  |
 | `dmnetif_mac_addr_t`       | `{ uint8_t addr[DMNETIF_MAC_ADDR_LEN] }` - MAC address              |
-| `dmnetif_ip_family_t`      | `dmnetif_ip_family_none` \| `_v4` \| `_v6`                          |
-| `dmnetif_ip_addr_t`        | `{ family; union { v4[4]; v6[16]; } addr; }` - one type for both IPv4 and IPv6, discriminated by `family` |
+| `dmip_family_t` (from [dmip](../../dmip)) | `dmip_family_none` \| `_v4` \| `_v6`         |
+| `dmip_addr_t` (from [dmip](../../dmip)) | `{ family; union { v4[4]; v6[16]; } addr; }` - one type for both IPv4 and IPv6, discriminated by `family`; shared with dmroute rather than a dmnetif-specific type |
 | `dmnetif_link_status_t`    | `dmnetif_link_down` \| `dmnetif_link_up`                            |
 | `dmnetif_stats_t`          | `{ rx_packets; rx_bytes; tx_packets; tx_bytes; tx_errors; }` - packet counters, see `dmnetif_get_stats()` |
 | `dmnetif_iterator_func_t`  | `bool (*)(dmnetif_iface_t iface, void* user_data)` - see `dmnetif_for_each()` |
@@ -58,11 +58,11 @@ API's shape.
 
 | Function                                          | Description               |
 |------------------------------------------------------|-------------------------------|
-| `dmnetif_get_ip_address(iface, ip)`                  | Read the interface's currently assigned IP address (`family` is `dmnetif_ip_family_none` if none assigned). |
-| `dmnetif_set_ip_address(iface, ip)`                  | Assign (or, with `dmnetif_ip_family_none`, clear) the interface's IP address. Local bookkeeping only - no dmdrvi ioctl, since IP addresses are a network-layer concept the driver has no notion of. |
-| `dmnetif_get_netmask(iface, netmask)`                | Read the interface's currently assigned netmask (`family` is `dmnetif_ip_family_none` if none assigned). Reuses `dmnetif_ip_addr_t` - a netmask is shaped exactly like an address. Nothing sets this via ioctl or CLI yet - `ifconfig` only displays it. |
+| `dmnetif_get_ip_address(iface, ip)`                  | Read the interface's currently assigned IP address (`family` is `dmip_family_none` if none assigned). |
+| `dmnetif_set_ip_address(iface, ip)`                  | Assign (or, with `dmip_family_none`, clear) the interface's IP address. Local bookkeeping only - no dmdrvi ioctl, since IP addresses are a network-layer concept the driver has no notion of. Also calls `dmroute_add()`/`_remove()` directly to keep the interface's connected route in [dmroute](../../dmroute) in sync. |
+| `dmnetif_get_netmask(iface, netmask)`                | Read the interface's currently assigned netmask (`family` is `dmip_family_none` if none assigned). Reuses `dmip_addr_t` - a netmask is shaped exactly like an address. Set it before `dmnetif_set_ip_address()` for it to be picked up by the connected route - `dmnetif_set_netmask()` itself does not trigger a route update. |
 | `dmnetif_set_netmask(iface, netmask)`                | Assign (or clear) the interface's netmask. Local bookkeeping only, same as the address. |
-| `dmnetif_get_broadcast(iface, broadcast)`            | Read the interface's currently assigned broadcast address (`family` is `dmnetif_ip_family_none` if none assigned). |
+| `dmnetif_get_broadcast(iface, broadcast)`            | Read the interface's currently assigned broadcast address (`family` is `dmip_family_none` if none assigned). |
 | `dmnetif_set_broadcast(iface, broadcast)`            | Assign (or clear) the interface's broadcast address. Local bookkeeping only. Settable directly via `ifconfig <iface> broadcast <addr>`. |
 
 ## Frame I/O

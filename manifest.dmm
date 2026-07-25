@@ -3,14 +3,20 @@ $include https://github.com/choco-technologies/dmnet/releases/download/vlatest/v
 
 # Module entries with version placeholder - expanded by $version-available.
 # This repo defines several independent modules (the top-level dmnet
-# library, the dmnetif network interface manager under lib/, and the
-# ifconfig CLI under tools/, plus each one's test module) - the release
-# workflow packages all of them per full architecture (<arch_name>), not
-# per CPU family, since none of them are hardware ports (contrast with
-# dmeth/manifest.dmm's dmeth_port entry).
+# library, dmip/dmnetif/dmroute under lib/, and the ifconfig/ip CLIs under
+# tools/, plus each one's test module) - the release workflow packages all
+# of them per full architecture (<arch_name>), not per CPU family, since
+# none of them are hardware ports (contrast with dmeth/manifest.dmm's
+# dmeth_port entry).
 dmnet          https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmnet-v<version>-<arch_name>.zip
 test_dmnet     https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_dmnet-v<version>-<arch_name>.zip
+dmip           https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmip-v<version>-<arch_name>.zip
+test_dmip      https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_dmip-v<version>-<arch_name>.zip
 dmnetif        https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmnetif-v<version>-<arch_name>.zip
 test_dmnetif   https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_dmnetif-v<version>-<arch_name>.zip
+dmroute        https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmroute-v<version>-<arch_name>.zip
+test_dmroute   https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_dmroute-v<version>-<arch_name>.zip
 ifconfig       https://github.com/choco-technologies/dmnet/releases/download/v<version>/ifconfig-v<version>-<arch_name>.zip
 test_ifconfig  https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_ifconfig-v<version>-<arch_name>.zip
+ip             https://github.com/choco-technologies/dmnet/releases/download/v<version>/ip-v<version>-<arch_name>.zip
+test_ip        https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_ip-v<version>-<arch_name>.zip
