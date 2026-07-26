@@ -12,11 +12,19 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
 )
 
-# dmroute/dmnetif/dmarp: the send/receive test steps register dmnetif
-# fixture interfaces, seed dmroute routes and dmarp cache entries by hand
-# (see dmip_test.c's file comment).
+# dmarp: the send/receive test steps seed dmarp cache entries by hand (see
+#        dmip_test.c's file comment).
 # dmnetbridge: feed_packet() drives dmip's packet_received DIF
 #              implementation directly via Dmod_GetNextDifModule()/
 #              Dmod_GetDifFunction(), the same way
 #              dmnetbridge_handle_netif_rx() itself does.
-target_link_libraries(${DMOD_MODULE_NAME} dmip_if dmroute_if dmnetif_if dmarp_if dmnetbridge_if)
+target_link_libraries(${DMOD_MODULE_NAME} dmip_if dmnetbridge_if)
+
+# dmnetif: the send/receive test steps register dmnetif fixture interfaces
+#          by hand (see dmip_test.c's file comment).
+# dmroute: routes are seeded by hand - see dmip_test.c's file comment.
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmarp
+    dmnetif
+    dmroute
+)

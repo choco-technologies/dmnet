@@ -32,32 +32,32 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# dmroute, dmnetif, dmnetbridge: in-tree siblings under dmnet/lib (added
-# earlier via the top-level add_subdirectory(lib), in the order dmroute ->
-# dmnetif -> dmarp -> dmnetbridge -> dmip - see dmnet/CMakeLists.txt and
-# lib/CMakeLists.txt), not separately published modules, so they're linked
+# dmnetbridge: dmnetbridge_send()/_get_source_address()/_get_mtu() for
+# dmip_v4_send(), and the packet_received DIF declaration dmip implements
+# - see src/dmip.c. An in-tree sibling under dmnet/lib (added earlier via
+# the top-level add_subdirectory(lib) - see dmnet/CMakeLists.txt and
+# lib/CMakeLists.txt), not a separately published module, so it's linked
 # directly rather than through dmod_link_modules() (which fetches a
-# *released* module's headers via dmf-get and would fail here since none
-# of them has such a release) - same convention lib/dmarp/CMakeLists.txt
-# uses for dmnetif.
-#   dmroute:      header-only - dmip.h needs dmroute_addr_t (re-exported as
-#                 dmip_addr_t) directly, even though dmip.c itself no
-#                 longer calls any dmroute_* function (that moved to
-#                 dmnetbridge - see src/dmip.c's top comment)
-#   dmnetif:      header-only - dmip.h needs dmnetif_iface_t for the
-#                 optional out_iface parameter on dmip_v4_receive()/
-#                 _v6_receive()/_receive(), even though dmip.c itself never
-#                 calls a dmnetif_* function directly anymore
-#   dmnetbridge:  dmnetbridge_send()/_get_source_address()/_get_mtu() for
-#                 dmip_v4_send(), and the packet_received DIF declaration
-#                 dmip implements - see src/dmip.c
-target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if dmnetbridge_if)
+# *released* module's headers via dmf-get and would fail here since it has
+# no such release).
+target_link_libraries(${DMOD_MODULE_NAME} dmnetbridge_if)
 
-# dmlist: backs the fragment reassembly table
-# dmosi:  mutexes guarding reassembly/identification state, plus
-#         dmosi_get_tick_count() for reassembly timeouts - see
-#         src/dmip.c's "Reassembly" section
+# dmnetif: header-only - dmip.h needs dmnetif_iface_t for the optional
+#          out_iface parameter on dmip_v4_receive()/_v6_receive()/
+#          _receive(), even though dmip.c itself never calls a dmnetif_*
+#          function directly anymore. A separately published module,
+#          fetched via dmod_link_modules().
+# dmroute: header-only - dmip.h needs dmroute_addr_t (re-exported as
+#          dmip_addr_t) directly, even though dmip.c itself no longer
+#          calls any dmroute_* function (that moved to dmnetbridge - see
+#          src/dmip.c's top comment)
+# dmlist:  backs the fragment reassembly table
+# dmosi:   mutexes guarding reassembly/identification state, plus
+#          dmosi_get_tick_count() for reassembly timeouts - see
+#          src/dmip.c's "Reassembly" section
 dmod_link_modules(${DMOD_MODULE_NAME}
+    dmnetif
+    dmroute
     dmlist
     dmosi
 )

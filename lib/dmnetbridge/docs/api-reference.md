@@ -24,5 +24,5 @@ behind this API's shape.
 |----------------------------|-----------------------------------------------------------------------|
 | `dmnetbridge_reset(void)`  | Clears dmnetbridge's own "which interfaces are being pumped" bookkeeping - call before spawning pump threads on a (re)start. |
 
-All addresses use `dmroute_addr_t` from [dmroute](../../dmroute);
+All addresses use `dmroute_addr_t` from dmroute;
 interfaces use `dmnetif_iface_t` from [dmnetif](../../dmnetif).

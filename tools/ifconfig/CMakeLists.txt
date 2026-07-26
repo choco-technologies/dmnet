@@ -23,14 +23,13 @@ dmod_add_executable(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/ifconfig.c
 )
 
-# dmnetif: the network interface manager this tool lists/controls. It's an
-# in-tree sibling (lib/dmnetif, added earlier via the top-level
-# add_subdirectory(lib) - see dmnet/CMakeLists.txt), not a separately
-# published module, so it's linked directly rather than through
-# dmod_link_modules() (which fetches a *released* module's headers via
-# dmf-get and would fail here since dmnetif has no such release).
+# dmnetif: the network interface manager this tool lists/controls.
 # dmroute: dmroute_addr_t, the type dmnetif's IP/netmask/broadcast fields
 #          use - dmnetif_if alone doesn't carry dmroute's include dir.
-target_link_libraries(${DMOD_MODULE_NAME} dmnetif_if dmroute_if)
+# Both are separately published modules, fetched via dmod_link_modules().
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmnetif
+    dmroute
+)
 
 add_subdirectory(tests)

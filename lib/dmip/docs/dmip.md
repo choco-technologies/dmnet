@@ -6,9 +6,8 @@ DMIP is the IP layer: building and parsing IPv4/IPv6 headers, the IPv4
 header checksum, TTL (IPv4) / Hop Limit (IPv6) handling, identification
 generation, fragmentation/reassembly for both families, and sending/
 receiving actual packets on the wire. `dmip_addr_t` - the address type
-every module in this tree uses - is re-exported here from
-[dmroute](../../dmroute), which owns the real definition (see "Address
-type" below).
+every module in this tree uses - is re-exported here from dmroute, which
+owns the real definition (see "Address type" below).
 
 ## Why a whole module for this
 
@@ -42,8 +41,8 @@ typedef dmroute_addr_t dmip_addr_t;
 
 Every existing dmip.h consumer (starting with dmip.c itself) keeps working
 under the `dmip_*` names completely unchanged - it's the same type either
-way, just owned by dmroute. See `lib/dmroute/docs/dmroute.md` for the full
-rationale from dmroute's side.
+way, just owned by dmroute. See dmroute's own docs for the full rationale
+from dmroute's side.
 
 ## No options, no extension headers
 

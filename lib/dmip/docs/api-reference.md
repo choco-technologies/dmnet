@@ -6,7 +6,7 @@ See [dmip.md](dmip.md) for the rationale behind this module's design.
 
 | Type                      | Description                                                                 |
 |----------------------------|------------------------------------------------------------------------------|
-| `dmip_family_t`           | Re-exported from `dmroute_family_t` (see [dmroute](../../dmroute)): `dmip_family_none` \| `_v4` \| `_v6` |
+| `dmip_family_t`           | Re-exported from `dmroute_family_t` (see dmroute): `dmip_family_none` \| `_v4` \| `_v6` |
 | `dmip_addr_t`             | Re-exported from `dmroute_addr_t`: `{ family; union { v4[DMIP_IPV4_ADDR_LEN]; v6[DMIP_IPV6_ADDR_LEN]; } addr; }` - one type for both IPv4 and IPv6, discriminated by `family` |
 | `dmip_v4_header_t`        | Parsed IPv4 header fields (dscp, ecn, total_length, identification, flag_df, flag_mf, fragment_offset, ttl, protocol, header_checksum, src, dst) |
 | `dmip_v6_header_t`        | Parsed IPv6 fixed header fields (traffic_class, flow_label, payload_length, next_header, hop_limit, src, dst) |

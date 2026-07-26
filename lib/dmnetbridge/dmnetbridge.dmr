@@ -32,7 +32,7 @@ readme=./README.md => ${destination}/${module}/README.md [origin=${repo_dir}/lib
 inc=./include => ${destination}/${module}/include [origin=${repo_dir}/lib/dmnetbridge/include] [origin=${build_dir}/lib/dmnetbridge/${module}_defs.h]
 
 # === License ===
-# License file - shared at the dmnet repo root (see lib/dmnetif/dmnetif.dmr
+# License file - shared at the dmnet repo root (see lib/dmarp/dmarp.dmr
 # for the same "nested module shares the parent repo's LICENSE" convention)
 license=./LICENSE => ${destination}/${module}/LICENSE [origin=${repo_dir}/LICENSE]
 

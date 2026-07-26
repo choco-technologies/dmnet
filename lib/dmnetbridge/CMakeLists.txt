@@ -33,24 +33,18 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# dmroute: dmroute_addr_t, route lookup for the send path
-# dmnetif: dmnetif_iface_t, frame send/receive, the interface registry
-# dmarp:   dmarp_resolve() before sending, dmarp_note_frame() for every
-#          received frame (see src/dmnetbridge.c)
-# All three are in-tree siblings (lib/dmroute, lib/dmnetif, lib/dmarp -
-# added earlier via the top-level add_subdirectory(lib) - see
-# dmnet/CMakeLists.txt), not separately published modules, so they're
-# linked directly rather than through dmod_link_modules() (which fetches a
-# *released* module's headers via dmf-get and would fail here since none
-# of them has such a release) - same convention lib/dmarp/CMakeLists.txt
-# already uses for dmroute/dmnetif.
-target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if dmarp_if)
-
-# dmlist: backs the "which interfaces currently have a pump loop running"
-#         bookkeeping dmnetbridge_reset() clears
-# dmosi:  dmnetbridge itself needs no thread/mutex of its own beyond that
-#         list's guard - see src/dmnetbridge.c
+# dmnetif: dmnetif_iface_t, frame send/receive, the interface registry - a
+#          separately published module, fetched via dmod_link_modules().
+# dmroute: dmroute_addr_t, route lookup for the send path - also a
+#          separately published module.
+# dmlist:  backs the "which interfaces currently have a pump loop running"
+#          bookkeeping dmnetbridge_reset() clears
+# dmosi:   dmnetbridge itself needs no thread/mutex of its own beyond that
+#          list's guard - see src/dmnetbridge.c
 dmod_link_modules(${DMOD_MODULE_NAME}
+    dmarp
+    dmnetif
+    dmroute
     dmlist
     dmosi
 )

@@ -2,7 +2,7 @@
 
 ## Overview
 
-`ip` is a CLI over [dmroute](../../../lib/dmroute)'s API - it inspects and
+`ip` is a CLI over dmroute's API - it inspects and
 controls the IP routing table, following `iproute2`'s `ip route` subset
 closely enough to be familiar. Like `ifconfig` does for `dmnetif`, it never
 touches dmroute's internals directly, only its public add/remove/lookup/
@@ -56,10 +56,9 @@ You do not need to run `ip route add` for an interface's own subnet - as
 soon as any code calls `dmnetif_set_ip_address()` on an interface (a DHCP
 client, static config in `networkd`, or `ifconfig`'s own future
 `inet`-setting command), dmroute adds a `connected` route for it
-automatically. See
-[dmroute/docs/dmroute.md](../../../lib/dmroute/docs/dmroute.md#automatic-registration)
-for exactly how that works - `ip` itself has nothing to do with it, and
-`ip route show` will report the route whether or not `ip` was ever run.
+automatically. See dmroute's own docs for exactly how that works - `ip`
+itself has nothing to do with it, and `ip route show` will report the
+route whether or not `ip` was ever run.
 
 ## Building
 

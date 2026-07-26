@@ -27,26 +27,27 @@ dmod_add_executable(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/networkd.c
 )
 
-# dmroute:     header-only - dmnetif.h needs dmroute_addr_t directly, even
-#              though networkd.c itself never calls a dmroute_* function
-# dmnetif:     dmnetif_for_each() to enumerate already-registered
-#              interfaces, dmnetif_get_name()/dmnetif_is_present() for
-#              pump-thread naming/shutdown - see src/networkd.c
 # dmnetbridge: dmnetbridge_reset()/_handle_netif_rx() - the whole point of
-#              this service
-# All three are in-tree siblings under dmnet/lib (added earlier via the
+# this service. An in-tree sibling under dmnet/lib (added earlier via the
 # top-level add_subdirectory(lib) - see dmnet/CMakeLists.txt and
-# lib/CMakeLists.txt), not separately published modules, so they're linked
+# lib/CMakeLists.txt), not a separately published module, so it's linked
 # directly rather than through dmod_link_modules() (which fetches a
-# *released* module's headers via dmf-get and would fail here since none
-# of them has such a release) - same convention lib/dmarp/CMakeLists.txt
-# uses for dmnetif.
-target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if dmnetbridge_if)
+# *released* module's headers via dmf-get and would fail here since it has
+# no such release).
+target_link_libraries(${DMOD_MODULE_NAME} dmnetbridge_if)
 
-# dmlist: backs g_pumps (every spawned pump thread, for shutdown)
-# dmosi:  dmosi_thread_create()/_join()/_kill()/_destroy()/_sleep() to run
-#         and stop pump threads
+# dmnetif: dmnetif_for_each() to enumerate already-registered interfaces,
+#          dmnetif_get_name()/dmnetif_is_present() for pump-thread
+#          naming/shutdown - see src/networkd.c. A separately published
+#          module, fetched via dmod_link_modules().
+# dmroute: header-only - dmnetif.h needs dmroute_addr_t directly, even
+#          though networkd.c itself never calls a dmroute_* function.
+# dmlist:  backs g_pumps (every spawned pump thread, for shutdown)
+# dmosi:   dmosi_thread_create()/_join()/_kill()/_destroy()/_sleep() to run
+#          and stop pump threads
 dmod_link_modules(${DMOD_MODULE_NAME}
+    dmnetif
+    dmroute
     dmlist
     dmosi
 )

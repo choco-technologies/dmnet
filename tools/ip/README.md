@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 
 `ip` DMOD application module - a CLI to inspect and control the IP routing
-table managed by [dmroute](../../lib/dmroute). It never touches dmroute's
+table managed by dmroute. It never touches dmroute's
 internals directly, only its public add/remove/lookup/for_each API, the
 same boundary `ifconfig` enforces around `dmnetif`.
 
@@ -33,8 +33,8 @@ default via 192.168.1.1 dev eth0 metric 50
 
 You do not need to `ip route add` an interface's own subnet - dmroute adds
 a `connected` route for it automatically as soon as the interface is given
-an IP address (see
-[dmroute's docs](../../lib/dmroute/docs/dmroute.md#automatic-registration)).
+an IP address (see [docs/ip.md](docs/ip.md#automatic-registration), or
+dmroute's own docs for the full rationale from dmroute's side).
 
 ## Building
 

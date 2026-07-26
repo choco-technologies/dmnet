@@ -5,7 +5,7 @@
 dmip DMOD library module - the IP layer: building/parsing IPv4 and IPv6
 headers, the IPv4 header checksum, TTL/Hop-Limit handling, identification
 generation, fragmentation/reassembly for both families, and sending/
-receiving actual packets (route lookup via [dmroute](../dmroute), ARP via
+receiving actual packets (route lookup via dmroute, ARP via
 [dmarp](../dmarp), frame I/O via [dmnetif](../dmnetif)). `dmip_addr_t` is
 re-exported from dmroute, which owns the real definition - see
 [docs/dmip.md](docs/dmip.md) for the full rationale.

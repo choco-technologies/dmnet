@@ -8,9 +8,13 @@ dmod_add_test(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     ifconfig_test.c
 )
 
-# dmnetif is linked directly - `ifconfig` itself is never linked as a
-# dependency here. It's invoked on demand through Dmod_RunModule() (see
-# ifconfig_test.c), which loads/runs/unloads it per call instead of holding
-# it resident for the whole test run.
-# dmroute_addr_t (from dmroute_if) is used directly to build test addresses.
-target_link_libraries(${DMOD_MODULE_NAME} dmnetif_if dmroute_if)
+# `ifconfig` itself is never linked as a dependency here - it's invoked on
+# demand through Dmod_RunModule() (see ifconfig_test.c), which
+# loads/runs/unloads it per call instead of holding it resident for the
+# whole test run.
+# dmroute_addr_t is used directly to build test addresses; dmnetif backs
+# the fixture interfaces the tests register against.
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmnetif
+    dmroute
+)

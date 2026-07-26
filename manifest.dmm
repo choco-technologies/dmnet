@@ -3,19 +3,16 @@ $include https://github.com/choco-technologies/dmnet/releases/download/vlatest/v
 
 # Module entries with version placeholder - expanded by $version-available.
 # This repo defines several independent modules (the top-level dmnet
-# library, dmip/dmnetif/dmroute/dmarp under lib/, and the ifconfig/ip CLIs
-# under tools/, plus each one's test module) - the release workflow
-# packages all of them per full architecture (<arch_name>), not per CPU
-# family, since none of them are hardware ports (contrast with
-# dmeth/manifest.dmm's dmeth_port entry).
+# library, dmip/dmarp under lib/, and the ifconfig/ip CLIs under tools/,
+# plus each one's test module) - the release workflow packages all of them
+# per full architecture (<arch_name>), not per CPU family, since none of
+# them are hardware ports (contrast with dmeth/manifest.dmm's dmeth_port
+# entry). dmroute and dmnetif now live in their own repositories/manifests
+# and are fetched from there via dmod_link_modules().
 dmnet          https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmnet-v<version>-<arch_name>.zip
 test_dmnet     https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_dmnet-v<version>-<arch_name>.zip
 dmip           https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmip-v<version>-<arch_name>.zip
 test_dmip      https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_dmip-v<version>-<arch_name>.zip
-dmnetif        https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmnetif-v<version>-<arch_name>.zip
-test_dmnetif   https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_dmnetif-v<version>-<arch_name>.zip
-dmroute        https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmroute-v<version>-<arch_name>.zip
-test_dmroute   https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_dmroute-v<version>-<arch_name>.zip
 dmarp          https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmarp-v<version>-<arch_name>.zip
 test_dmarp     https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_dmarp-v<version>-<arch_name>.zip
 ifconfig       https://github.com/choco-technologies/dmnet/releases/download/v<version>/ifconfig-v<version>-<arch_name>.zip
