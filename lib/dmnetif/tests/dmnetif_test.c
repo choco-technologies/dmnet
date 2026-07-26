@@ -165,6 +165,16 @@ DMOD_TEST_STEP(is_up_starts_false)
     DMOD_TEST_EXPECT_FALSE(dmnetif_is_up(g_iface));
 }
 
+DMOD_TEST_STEP(is_present_true_for_registered_interface)
+{
+    DMOD_TEST_EXPECT_TRUE(dmnetif_is_present(g_iface));
+}
+
+DMOD_TEST_STEP(is_present_invalid_handle_returns_false)
+{
+    DMOD_TEST_EXPECT_FALSE(dmnetif_is_present(NULL));
+}
+
 /* ---- IP address ---- */
 
 DMOD_TEST_STEP(ip_address_starts_unassigned)

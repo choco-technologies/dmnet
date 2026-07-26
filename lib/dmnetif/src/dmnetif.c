@@ -455,6 +455,14 @@ dmod_dmnetif_api_declaration(1.0, dmnetif_link_status_t, _get_link_status, ( dmn
     return (status == DMDRVI_NET_LINK_UP) ? dmnetif_link_up : dmnetif_link_down;
 }
 
+/**
+ * @brief Implementation of dmnetif_is_present() - see dmnetif.h
+ */
+dmod_dmnetif_api_declaration(1.0, bool, _is_present, ( dmnetif_iface_t iface ))
+{
+    return is_valid_iface(iface) && Dmod_FileAvailable(iface->device_path);
+}
+
 /* ---- MTU ---- */
 
 /**

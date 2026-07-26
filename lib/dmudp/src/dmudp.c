@@ -208,21 +208,19 @@ static int extract_udp_datagram(const uint8_t* segment, size_t segment_len, uint
  *
  * No separate dmudp_v4_receive()/_v6_receive() (same reasoning as
  * dmudp_send() not having a per-family split): built on dmip_receive(),
- * a single dmnetif_receive() call covering either family, rather than
- * two per-family calls that would each risk silently dropping a frame of
- * the *other* family (dmnetif_receive() hands back whichever frame is
- * pending regardless of its ethertype, and there's no way to put a
- * consumed frame back).
+ * which already waits for either family on its own internal queue rather
+ * than two per-family calls that would each risk starving the other (see
+ * dmip_receive()'s own doc comment).
  */
-dmod_dmudp_api_declaration(1.0, int, _receive, ( dmnetif_iface_t iface, dmip_family_t* out_family, dmip_addr_t* out_src_ip, uint16_t* out_src_port, uint16_t* out_dst_port, uint8_t** out_payload, size_t* out_payload_len ))
+dmod_dmudp_api_declaration(1.0, int, _receive, ( uint32_t timeout_ms, dmip_family_t* out_family, dmip_addr_t* out_src_ip, uint16_t* out_src_port, uint16_t* out_dst_port, uint8_t** out_payload, size_t* out_payload_len, dmnetif_iface_t* out_iface ))
 {
-    if (iface == NULL || out_family == NULL || out_src_ip == NULL || out_src_port == NULL || out_dst_port == NULL || out_payload == NULL || out_payload_len == NULL)
+    if (out_family == NULL || out_src_ip == NULL || out_src_port == NULL || out_dst_port == NULL || out_payload == NULL || out_payload_len == NULL)
         return -EINVAL;
 
     uint8_t* ip_packet = NULL;
     size_t ip_packet_len = 0;
     dmip_family_t family = dmip_family_none;
-    int result = dmip_receive(iface, &family, &ip_packet, &ip_packet_len);
+    int result = dmip_receive(timeout_ms, &family, &ip_packet, &ip_packet_len, out_iface);
     if (result != 0)
         return result;
 

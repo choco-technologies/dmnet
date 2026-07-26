@@ -61,6 +61,43 @@ static bool mac_equal(const dmnetif_mac_addr_t* a, const dmnetif_mac_addr_t* b)
     return true;
 }
 
+/* Byte offsets/values mirror src/dmarp.c's own documented frame layout
+ * (Ethernet II + ARP, IPv4-over-Ethernet, 42 bytes) - kept independent of
+ * the internal build_request_frame()/parse_sender_from_frame() helpers so
+ * this test builds frames the way a peer on the wire actually would,
+ * rather than reusing dmarp's own (possibly buggy) construction code. */
+#define TEST_ARP_FRAME_LEN     42u
+#define TEST_ARP_ETHERTYPE     0x0806u
+#define TEST_ARP_HTYPE_ETH     1u
+#define TEST_ARP_PTYPE_IPV4    0x0800u
+#define TEST_ARP_OP_REQUEST    1u
+#define TEST_ARP_OP_REPLY      2u
+
+static void write_u16_be(uint8_t* p, uint16_t value)
+{
+    p[0] = (uint8_t)(value >> 8);
+    p[1] = (uint8_t)(value & 0xFF);
+}
+
+static void build_arp_frame(uint8_t* frame, uint16_t opcode, const dmnetif_mac_addr_t* sender_mac, const dmroute_addr_t* sender_ip)
+{
+    memset(frame, 0, TEST_ARP_FRAME_LEN);
+
+    memset(&frame[0], 0xFF, DMNETIF_MAC_ADDR_LEN); /* destination MAC - unused by dmarp_note_frame() */
+    memcpy(&frame[6], sender_mac->addr, DMNETIF_MAC_ADDR_LEN);
+    write_u16_be(&frame[12], TEST_ARP_ETHERTYPE);
+
+    uint8_t* arp = &frame[14];
+    write_u16_be(&arp[0], TEST_ARP_HTYPE_ETH);
+    write_u16_be(&arp[2], TEST_ARP_PTYPE_IPV4);
+    arp[4] = DMNETIF_MAC_ADDR_LEN;
+    arp[5] = DMROUTE_IPV4_ADDR_LEN;
+    write_u16_be(&arp[6], opcode);
+    memcpy(&arp[8], sender_mac->addr, DMNETIF_MAC_ADDR_LEN);
+    memcpy(&arp[14], sender_ip->addr.v4, DMROUTE_IPV4_ADDR_LEN);
+    /* arp[18..27] (target hw/proto addr) left zeroed - not read by dmarp_note_frame() */
+}
+
 void dmod_test_setup(void)
 {
     g_iface0 = dmnetif_register("test0", TEST_DEVICE_PATH_0);
@@ -238,4 +275,106 @@ DMOD_TEST_STEP(resolve_non_v4_family_returns_einval)
     ip.family = dmroute_family_v6;
     dmnetif_mac_addr_t mac = { 0 };
     DMOD_TEST_EXPECT_EQ(dmarp_resolve(g_iface0, &ip, &mac, DMARP_DEFAULT_TIMEOUT_MS), -EINVAL);
+}
+
+/* ---- note_frame: opportunistic learning ----
+ *
+ * dmarp_resolve() itself no longer reads frames off the wire (see dmarp.h's
+ * top comment) - dmnetbridge's RX pump feeds every received frame to
+ * dmarp_note_frame() instead, which is what these steps exercise directly,
+ * standing in for that pump.
+ */
+
+DMOD_TEST_STEP(note_frame_caches_sender_from_request)
+{
+    dmroute_addr_t sender_ip = make_v4(10, 0, 1, 1);
+    dmnetif_mac_addr_t sender_mac = make_mac(0x21);
+    uint8_t frame[TEST_ARP_FRAME_LEN];
+    build_arp_frame(frame, TEST_ARP_OP_REQUEST, &sender_mac, &sender_ip);
+
+    dmarp_note_frame(g_iface0, frame, sizeof(frame));
+
+    dmnetif_mac_addr_t got = { 0 };
+    DMOD_TEST_EXPECT_TRUE(dmarp_cache_lookup(g_iface0, &sender_ip, &got));
+    DMOD_TEST_EXPECT_TRUE(mac_equal(&got, &sender_mac));
+
+    dmarp_cache_remove(g_iface0, &sender_ip);
+}
+
+DMOD_TEST_STEP(note_frame_caches_sender_from_reply)
+{
+    dmroute_addr_t sender_ip = make_v4(10, 0, 1, 2);
+    dmnetif_mac_addr_t sender_mac = make_mac(0x22);
+    uint8_t frame[TEST_ARP_FRAME_LEN];
+    build_arp_frame(frame, TEST_ARP_OP_REPLY, &sender_mac, &sender_ip);
+
+    dmarp_note_frame(g_iface0, frame, sizeof(frame));
+
+    dmnetif_mac_addr_t got = { 0 };
+    DMOD_TEST_EXPECT_TRUE(dmarp_cache_lookup(g_iface0, &sender_ip, &got));
+    DMOD_TEST_EXPECT_TRUE(mac_equal(&got, &sender_mac));
+
+    dmarp_cache_remove(g_iface0, &sender_ip);
+}
+
+DMOD_TEST_STEP(note_frame_unblocks_pending_resolve)
+{
+    /* dmarp_resolve() itself can never succeed against these no-driver
+     * fixtures (see resolve_cache_miss_without_real_driver_returns_enodev),
+     * so this checks the piece note_frame_unblocks_pending_resolve is
+     * actually responsible for in isolation: a cache entry it inserts is
+     * immediately visible to a concurrent cache_lookup(), which is exactly
+     * what wakes dmarp_resolve()'s wait loop into finding it. */
+    dmroute_addr_t sender_ip = make_v4(10, 0, 1, 3);
+    dmnetif_mac_addr_t sender_mac = make_mac(0x23);
+    uint8_t frame[TEST_ARP_FRAME_LEN];
+    build_arp_frame(frame, TEST_ARP_OP_REPLY, &sender_mac, &sender_ip);
+
+    DMOD_TEST_EXPECT_FALSE(dmarp_cache_lookup(g_iface0, &sender_ip, &sender_mac));
+
+    dmarp_note_frame(g_iface0, frame, sizeof(frame));
+
+    dmnetif_mac_addr_t resolved = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmarp_resolve(g_iface0, &sender_ip, &resolved, DMARP_DEFAULT_TIMEOUT_MS), 0);
+    DMOD_TEST_EXPECT_TRUE(mac_equal(&resolved, &sender_mac));
+
+    dmarp_cache_remove(g_iface0, &sender_ip);
+}
+
+DMOD_TEST_STEP(note_frame_ignores_non_arp_ethertype)
+{
+    dmroute_addr_t sender_ip = make_v4(10, 0, 1, 4);
+    dmnetif_mac_addr_t sender_mac = make_mac(0x24);
+    uint8_t frame[TEST_ARP_FRAME_LEN];
+    build_arp_frame(frame, TEST_ARP_OP_REPLY, &sender_mac, &sender_ip);
+    write_u16_be(&frame[12], 0x0800u); /* IPv4, not ARP */
+
+    size_t before = dmarp_cache_count();
+    dmarp_note_frame(g_iface0, frame, sizeof(frame));
+    DMOD_TEST_EXPECT_EQ(dmarp_cache_count(), before);
+}
+
+DMOD_TEST_STEP(note_frame_ignores_too_short_frame)
+{
+    dmroute_addr_t sender_ip = make_v4(10, 0, 1, 5);
+    dmnetif_mac_addr_t sender_mac = make_mac(0x25);
+    uint8_t frame[TEST_ARP_FRAME_LEN];
+    build_arp_frame(frame, TEST_ARP_OP_REPLY, &sender_mac, &sender_ip);
+
+    size_t before = dmarp_cache_count();
+    dmarp_note_frame(g_iface0, frame, TEST_ARP_FRAME_LEN - 1);
+    DMOD_TEST_EXPECT_EQ(dmarp_cache_count(), before);
+}
+
+DMOD_TEST_STEP(note_frame_null_arguments_is_noop)
+{
+    dmroute_addr_t sender_ip = make_v4(10, 0, 1, 6);
+    dmnetif_mac_addr_t sender_mac = make_mac(0x26);
+    uint8_t frame[TEST_ARP_FRAME_LEN];
+    build_arp_frame(frame, TEST_ARP_OP_REPLY, &sender_mac, &sender_ip);
+
+    size_t before = dmarp_cache_count();
+    dmarp_note_frame(NULL, frame, sizeof(frame));
+    dmarp_note_frame(g_iface0, NULL, sizeof(frame));
+    DMOD_TEST_EXPECT_EQ(dmarp_cache_count(), before);
 }

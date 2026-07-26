@@ -213,6 +213,23 @@ dmod_dmnetif_api(1.0, bool, _is_up, ( dmnetif_iface_t iface ));
  */
 dmod_dmnetif_api(1.0, dmnetif_link_status_t, _get_link_status, ( dmnetif_iface_t iface ));
 
+/**
+ * @brief Check whether the interface's backing device file still exists
+ *
+ * Distinct from dmnetif_is_up(): that tracks administrative state (has
+ * dmnetif_up() been called), this checks whether the devfs path opened in
+ * dmnetif_register() is still present at all - e.g. a hot-unplugged driver
+ * that removed its device node out from under an already-open interface.
+ * Intended for a long-running reader (e.g. networkd's per-interface pump
+ * loop) to know when to stop calling dmnetif_receive() on this interface
+ * and let it go.
+ *
+ * @param iface Interface handle
+ *
+ * @return true if iface is valid and its backing device file still exists
+ */
+dmod_dmnetif_api(1.0, bool, _is_present, ( dmnetif_iface_t iface ));
+
 /* ============================================================================
  *                      MTU
  * ========================================================================== */

@@ -16,21 +16,35 @@
  * backs either fixture, so neither can ever actually go "up" - a full
  * dmip_v4_send() transmission can't be exercised end-to-end here, but
  * everything up to the point a real driver would be needed can: route
- * lookup (dmroute), a cache-hit ARP resolution (dmarp, seeded by hand -
- * the same "no real driver" limitation dmarp_test.c documents for its own
- * cache-miss path applies here too), fragmentation, and Ethernet framing,
- * failing only at the final dmnetif_send() (-EIO, interface not up).
+ * lookup and ARP resolution (both now inside dmnetbridge_send() - a
+ * cache-hit ARP entry is seeded by hand, the same "no real driver"
+ * limitation dmarp_test.c documents for its own cache-miss path applies
+ * here too), fragmentation, and Ethernet framing, failing only at the
+ * final dmnetif_send() (-EIO, interface not up).
+ *
+ * Receiving is push-based (see dmip.c's "Receive queue" section) - there
+ * is no interface to poll anymore, so the receive steps instead simulate
+ * what dmnetbridge_handle_netif_rx() would do after a real
+ * dmnetif_receive(): feed_packet() below builds a minimal Ethernet frame
+ * by hand and drives it straight into dmip's packet_received DIF
+ * implementation via Dmod_GetNextDifModule()/Dmod_GetDifFunction() - the
+ * same discovery dmnetbridge_handle_netif_rx() itself uses, see
+ * dmnetbridge.c's broadcast_packet_received(). This requires
+ * ENABLE_DIF_REGISTRATIONS (see dmnetbridge.h's own doc comment on
+ * dmod_dmnetbridge_packet_received_sig) and linking dmnetbridge_if.
  *
  * Every send/receive step uses a distinct destination network (never
  * reused across steps), since dmroute's routes and dmarp's cache are
  * both global state that outlives a single test step - same discipline
  * dmarp_test.c documents for its own cache entries.
  */
+#define ENABLE_DIF_REGISTRATIONS ON
 #include "dmod_test.h"
 #include "dmip.h"
 #include "dmroute.h"
 #include "dmnetif.h"
 #include "dmarp.h"
+#include "dmnetbridge.h"
 #include <string.h>
 #include <errno.h>
 
@@ -779,11 +793,12 @@ DMOD_TEST_STEP(v4_send_route_to_unregistered_iface_returns_enodev)
 
 DMOD_TEST_STEP(v4_send_full_path_without_real_driver_returns_eio)
 {
-    /* Route + a hand-seeded ARP cache entry let dmip_v4_send() run its
-     * entire pipeline (route lookup, ARP cache hit, fragmentation,
-     * Ethernet framing) without needing a real driver - it only fails at
-     * the very last step, dmnetif_send() against an interface that could
-     * never be brought up (no real driver behind "/null"). */
+    /* Route + a hand-seeded ARP cache entry let dmip_v4_send() -> the
+     * per-fragment dmnetbridge_send() call - run its entire pipeline
+     * (route lookup, ARP cache hit, fragmentation, Ethernet framing)
+     * without needing a real driver - it only fails at the very last
+     * step, dmnetif_send() against an interface that could never be
+     * brought up (no real driver behind "/null"). */
     dmip_addr_t dest_net = make_v4(172, 16, 5, 0);
     dmip_addr_t netmask = make_v4(255, 255, 255, 0);
     dmroute_route_t route = dmroute_add(&dest_net, &netmask, NULL, "test0", DMROUTE_DEFAULT_METRIC, dmroute_origin_static);
@@ -805,26 +820,124 @@ DMOD_TEST_STEP(v4_send_full_path_without_real_driver_returns_eio)
     dmroute_remove(route);
 }
 
-/* ---- IPv4 / IPv6: receive ---- */
+/* ---- IPv4 / IPv6: receive ----
+ *
+ * Receiving is push-based now (see dmip.c's "Receive queue" section) -
+ * dmip_v4_receive()/_v6_receive()/_receive() wait on an internal queue fed
+ * by dmip's own implementation of dmnetbridge's packet_received DIF
+ * (dmip_dmnetbridge_packet_received()), not by polling an interface
+ * directly. feed_packet() below calls that DIF implementation's exact
+ * counterpart - a hand-built Ethernet frame - the same way
+ * dmnetbridge_handle_netif_rx() would after actually reading one off a
+ * real interface, without needing a real driver or a background pump
+ * thread to exercise the queue/signal/timeout plumbing.
+ */
+
+#define TEST_ETH_HEADER_LEN 14u
+#define TEST_ETHERTYPE_IPV4 0x0800u
+#define TEST_ETHERTYPE_IPV6 0x86DDu
+
+static void write_u16_be(uint8_t* p, uint16_t value)
+{
+    p[0] = (uint8_t)(value >> 8);
+    p[1] = (uint8_t)(value & 0xFF);
+}
+
+/**
+ * @brief Build a minimal Ethernet frame around `packet` and broadcast it
+ *        to every packet_received DIF implementor (dmip's own, in
+ *        practice, since this binary doesn't link any other implementor) -
+ *        the same discovery dmnetbridge_handle_netif_rx() itself uses
+ *        after a real dmnetif_receive(), see
+ *        dmnetbridge.c's broadcast_packet_received()
+ */
+static void feed_packet(dmnetif_iface_t iface, uint16_t ethertype, const uint8_t* packet, size_t packet_len)
+{
+    size_t frame_len = TEST_ETH_HEADER_LEN + packet_len;
+    uint8_t* frame = Dmod_Malloc(frame_len);
+    memset(frame, 0, TEST_ETH_HEADER_LEN);
+    write_u16_be(&frame[12], ethertype);
+    memcpy(frame + TEST_ETH_HEADER_LEN, packet, packet_len);
+
+    Dmod_Context_t* implementor = NULL;
+    while ((implementor = Dmod_GetNextDifModule(dmod_dmnetbridge_packet_received_sig, implementor)) != NULL)
+    {
+        dmod_dmnetbridge_packet_received_t fn =
+            (dmod_dmnetbridge_packet_received_t)Dmod_GetDifFunction(implementor, dmod_dmnetbridge_packet_received_sig);
+        if (fn != NULL)
+        {
+            fn(iface, frame, frame_len);
+        }
+    }
+
+    Dmod_Free(frame);
+}
+
+/**
+ * @brief Build a minimal, valid, unfragmented IPv4 packet (header + payload)
+ */
+static size_t build_v4_packet(uint8_t* buffer, size_t buffer_len, dmip_addr_t src, dmip_addr_t dst, const uint8_t* payload, size_t payload_len)
+{
+    dmip_v4_header_t header = { 0 };
+    header.total_length = (uint16_t)(DMIP_V4_HEADER_LEN + payload_len);
+    header.ttl = DMIP_DEFAULT_TTL;
+    header.protocol = DMIP_PROTO_UDP;
+    header.src = src;
+    header.dst = dst;
+
+    dmip_v4_build_header(buffer, buffer_len, &header);
+    memcpy(buffer + DMIP_V4_HEADER_LEN, payload, payload_len);
+    return DMIP_V4_HEADER_LEN + payload_len;
+}
 
 DMOD_TEST_STEP(v4_receive_rejects_bad_arguments)
 {
     uint8_t* out = NULL;
     size_t out_len = 0;
 
-    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(NULL, &out, &out_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(g_iface0, NULL, &out_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(g_iface0, &out, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(0, NULL, &out_len, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(0, &out, NULL, NULL), -EINVAL);
 }
 
-DMOD_TEST_STEP(v4_receive_no_pending_frame_returns_eagain)
+DMOD_TEST_STEP(v4_receive_no_pending_packet_returns_eagain)
 {
-    /* No real driver means dmnetif_receive() always reports "nothing
-     * pending" - the same reasoning dmarp_test.c relies on for its own
-     * cache-miss-without-driver step. */
     uint8_t* out = NULL;
     size_t out_len = 0;
-    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(g_iface0, &out, &out_len), -EAGAIN);
+    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(0, &out, &out_len, NULL), -EAGAIN);
+}
+
+DMOD_TEST_STEP(v4_receive_returns_packet_delivered_via_packet_received)
+{
+    uint8_t payload[4] = { 11, 22, 33, 44 };
+    uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
+    dmip_addr_t src = make_v4(10, 3, 0, 1);
+    dmip_addr_t dst = make_v4(10, 3, 0, 2);
+    size_t packet_len = build_v4_packet(packet, sizeof(packet), src, dst, payload, sizeof(payload));
+
+    feed_packet(g_iface0, TEST_ETHERTYPE_IPV4, packet, packet_len);
+
+    uint8_t* out = NULL;
+    size_t out_len = 0;
+    dmnetif_iface_t out_iface = NULL;
+    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(0, &out, &out_len, &out_iface), 0);
+    DMOD_TEST_EXPECT_EQ(out_len, packet_len);
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(out, packet, packet_len));
+    DMOD_TEST_EXPECT_EQ(out_iface, g_iface0);
+
+    Dmod_Free(out);
+}
+
+DMOD_TEST_STEP(v4_receive_ignores_non_ipv4_ethertype)
+{
+    uint8_t payload[2] = { 1, 2 };
+    uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
+    build_v4_packet(packet, sizeof(packet), make_v4(10, 3, 1, 1), make_v4(10, 3, 1, 2), payload, sizeof(payload));
+
+    feed_packet(g_iface0, TEST_ETHERTYPE_IPV6, packet, sizeof(packet));
+
+    uint8_t* out = NULL;
+    size_t out_len = 0;
+    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(0, &out, &out_len, NULL), -EAGAIN);
 }
 
 DMOD_TEST_STEP(v6_receive_rejects_bad_arguments)
@@ -832,16 +945,42 @@ DMOD_TEST_STEP(v6_receive_rejects_bad_arguments)
     uint8_t* out = NULL;
     size_t out_len = 0;
 
-    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(NULL, &out, &out_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(g_iface0, NULL, &out_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(g_iface0, &out, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(0, NULL, &out_len, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(0, &out, NULL, NULL), -EINVAL);
 }
 
-DMOD_TEST_STEP(v6_receive_no_pending_frame_returns_eagain)
+DMOD_TEST_STEP(v6_receive_no_pending_packet_returns_eagain)
 {
     uint8_t* out = NULL;
     size_t out_len = 0;
-    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(g_iface0, &out, &out_len), -EAGAIN);
+    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(0, &out, &out_len, NULL), -EAGAIN);
+}
+
+DMOD_TEST_STEP(v6_receive_returns_packet_delivered_via_packet_received)
+{
+    uint8_t payload[3] = { 7, 8, 9 };
+    dmip_v6_header_t header = { 0 };
+    header.payload_length = sizeof(payload);
+    header.hop_limit = DMIP_DEFAULT_HOP_LIMIT;
+    header.next_header = DMIP_PROTO_UDP;
+    header.src = make_v6(31);
+    header.dst = make_v6(32);
+
+    uint8_t packet[DMIP_V6_HEADER_LEN + sizeof(payload)];
+    dmip_v6_build_header(packet, sizeof(packet), &header);
+    memcpy(packet + DMIP_V6_HEADER_LEN, payload, sizeof(payload));
+
+    feed_packet(g_iface1, TEST_ETHERTYPE_IPV6, packet, sizeof(packet));
+
+    uint8_t* out = NULL;
+    size_t out_len = 0;
+    dmnetif_iface_t out_iface = NULL;
+    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(0, &out, &out_len, &out_iface), 0);
+    DMOD_TEST_EXPECT_EQ(out_len, sizeof(packet));
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(out, packet, sizeof(packet)));
+    DMOD_TEST_EXPECT_EQ(out_iface, g_iface1);
+
+    Dmod_Free(out);
 }
 
 /* ---- Family-agnostic: send/receive dispatch ---- */
@@ -902,16 +1041,36 @@ DMOD_TEST_STEP(receive_rejects_bad_arguments)
     uint8_t* out = NULL;
     size_t out_len = 0;
 
-    DMOD_TEST_EXPECT_EQ(dmip_receive(NULL, &family, &out, &out_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_receive(g_iface0, NULL, &out, &out_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_receive(g_iface0, &family, NULL, &out_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_receive(g_iface0, &family, &out, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_receive(0, NULL, &out, &out_len, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_receive(0, &family, NULL, &out_len, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_receive(0, &family, &out, NULL, NULL), -EINVAL);
 }
 
-DMOD_TEST_STEP(receive_no_pending_frame_returns_eagain)
+DMOD_TEST_STEP(receive_no_pending_packet_returns_eagain)
 {
     dmip_family_t family = dmip_family_none;
     uint8_t* out = NULL;
     size_t out_len = 0;
-    DMOD_TEST_EXPECT_EQ(dmip_receive(g_iface0, &family, &out, &out_len), -EAGAIN);
+    DMOD_TEST_EXPECT_EQ(dmip_receive(0, &family, &out, &out_len, NULL), -EAGAIN);
+}
+
+DMOD_TEST_STEP(receive_returns_v4_packet_delivered_via_packet_received)
+{
+    uint8_t payload[2] = { 42, 43 };
+    uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
+    size_t packet_len = build_v4_packet(packet, sizeof(packet), make_v4(10, 3, 2, 1), make_v4(10, 3, 2, 2), payload, sizeof(payload));
+
+    feed_packet(g_iface0, TEST_ETHERTYPE_IPV4, packet, packet_len);
+
+    dmip_family_t family = dmip_family_none;
+    uint8_t* out = NULL;
+    size_t out_len = 0;
+    dmnetif_iface_t out_iface = NULL;
+    DMOD_TEST_EXPECT_EQ(dmip_receive(0, &family, &out, &out_len, &out_iface), 0);
+    DMOD_TEST_EXPECT_EQ(family, dmip_family_v4);
+    DMOD_TEST_EXPECT_EQ(out_len, packet_len);
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(out, packet, packet_len));
+    DMOD_TEST_EXPECT_EQ(out_iface, g_iface0);
+
+    Dmod_Free(out);
 }

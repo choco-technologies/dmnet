@@ -40,22 +40,11 @@
 #define DMARP_ARP_PAYLOAD_LEN   28u
 #define DMARP_FRAME_LEN         (DMARP_ETH_HEADER_LEN + DMARP_ARP_PAYLOAD_LEN)
 
-/* Generous headroom over DMARP_FRAME_LEN for the receive buffer - other
- * traffic on the interface (not just ARP) shows up through the same
- * dmnetif_receive() call, and a too-small buffer would silently mangle
- * a legitimate larger frame instead of just failing to parse as ARP. */
-#define DMARP_RECEIVE_BUFFER_LEN 128u
-
 #define DMARP_ETHERTYPE_ARP     0x0806u
 #define DMARP_HTYPE_ETHERNET    1u
 #define DMARP_PTYPE_IPV4        0x0800u
 #define DMARP_OP_REQUEST        1u
 #define DMARP_OP_REPLY          2u
-
-/* How often dmarp_resolve()'s poll loop calls dmnetif_receive() while
- * waiting for a reply - short enough to stay responsive, long enough not
- * to busy-spin the CPU for the whole timeout window. */
-#define DMARP_POLL_INTERVAL_MS  10u
 
 /**
  * @brief One cached (interface, IP) -> MAC mapping
@@ -83,6 +72,19 @@ static dmlist_context_t* g_cache = NULL;
  * @brief Mutex guarding g_cache against concurrent lookup/insert/remove calls
  */
 static dmosi_mutex_t g_mutex = NULL;
+
+/**
+ * @brief Posted by dmarp_note_frame() whenever it caches a sender address
+ *        from an observed ARP frame, waking any dmarp_resolve() call
+ *        currently waiting for a reply
+ *
+ * A counting semaphore rather than an event: dmarp_resolve() re-checks the
+ * cache itself on every wake, so an extra/unrelated post (a different
+ * interface's or a different address's frame) just costs one harmless
+ * extra cache lookup, never a missed wake. Created in dmod_init(),
+ * destroyed in dmod_deinit().
+ */
+static dmosi_semaphore_t g_reply_signal = NULL;
 
 /**
  * @brief Needle used by compare_cache_key() - a cache entry is identified
@@ -275,21 +277,22 @@ static void build_request_frame(uint8_t* frame, const dmnetif_mac_addr_t* local_
 }
 
 /**
- * @brief Check whether a received frame is an ARP reply for `expected_sender_ip`
- *        and, if so, extract the sender's MAC address
+ * @brief Check whether a received frame is a well-formed ARP request or
+ *        reply and, if so, extract the sender's protocol+hardware address
  *
- * @param frame               Received frame bytes
- * @param length              Number of valid bytes in `frame`
- * @param expected_sender_ip  The address dmarp_resolve() asked about -
- *                            only a reply whose sender protocol address
- *                            matches this is a match; every other frame
- *                            on the wire (including other hosts' ARP
- *                            traffic) is silently ignored
- * @param out_mac             Output buffer for the sender's MAC address
+ * Deliberately opcode-agnostic and doesn't filter by sender/target address -
+ * dmarp_note_frame() wants to learn from *any* ARP traffic it sees, not
+ * just replies to a request we ourselves sent. See dmarp_note_frame()'s
+ * doc comment for why a request is just as useful a source as a reply.
  *
- * @return true if `frame` is a matching ARP reply
+ * @param frame     Received frame bytes
+ * @param length    Number of valid bytes in `frame`
+ * @param out_ip    Output buffer for the sender's protocol (IPv4) address
+ * @param out_mac   Output buffer for the sender's MAC address
+ *
+ * @return true if `frame` is a well-formed ARP request or reply
  */
-static bool parse_reply_frame(const uint8_t* frame, size_t length, const dmroute_addr_t* expected_sender_ip, dmnetif_mac_addr_t* out_mac)
+static bool parse_sender_from_frame(const uint8_t* frame, size_t length, dmroute_addr_t* out_ip, dmnetif_mac_addr_t* out_mac)
 {
     if (length < DMARP_FRAME_LEN)
         return false;
@@ -304,12 +307,12 @@ static bool parse_reply_frame(const uint8_t* frame, size_t length, const dmroute
     if (arp[4] != DMNETIF_MAC_ADDR_LEN || arp[5] != DMROUTE_IPV4_ADDR_LEN)
         return false;
 
-    if (read_u16_be(&arp[6]) != DMARP_OP_REPLY)
+    uint16_t opcode = read_u16_be(&arp[6]);
+    if (opcode != DMARP_OP_REQUEST && opcode != DMARP_OP_REPLY)
         return false;
 
-    if (!ipv4_bytes_equal(&arp[14], expected_sender_ip->addr.v4))
-        return false;
-
+    out_ip->family = dmroute_family_v4;
+    memcpy(out_ip->addr.v4, &arp[14], DMROUTE_IPV4_ADDR_LEN);
     memcpy(out_mac->addr, &arp[8], DMNETIF_MAC_ADDR_LEN);
     return true;
 }
@@ -330,7 +333,8 @@ int dmod_init(const Dmod_Config_t *Config)
 
     g_cache = dmlist_create(Dmod_GetCurrentAllocatorName());
     g_mutex = dmosi_mutex_create(false);
-    if (g_cache == NULL || g_mutex == NULL)
+    g_reply_signal = dmosi_semaphore_create(0, UINT32_MAX);
+    if (g_cache == NULL || g_mutex == NULL || g_reply_signal == NULL)
     {
         DMOD_LOG_ERROR("Failed to allocate dmarp cache\n");
         return -1;
@@ -358,6 +362,9 @@ int dmod_deinit(void)
 
     dmosi_mutex_destroy(g_mutex);
     g_mutex = NULL;
+
+    dmosi_semaphore_destroy(g_reply_signal);
+    g_reply_signal = NULL;
 
     DMOD_LOG_INFO("DMARP resolver deinitialized\n");
     return 0;
@@ -398,21 +405,43 @@ dmod_dmarp_api_declaration(1.0, int, _resolve, ( dmnetif_iface_t iface, const dm
         return -EIO;
     }
 
+    /* Can't poll dmnetif_receive() here anymore - once networkd starts,
+     * dmnetbridge's per-interface RX pump is the only code path allowed to
+     * read this interface (see dmnetbridge_handle_netif_rx()'s doc
+     * comment). Instead, wait for dmarp_note_frame() to observe a matching
+     * reply (fed to it by that same pump) and cache it, re-checking the
+     * cache ourselves on every wake. */
     uint32_t deadline = dmosi_get_tick_count() + timeout_ms;
-    uint8_t buffer[DMARP_RECEIVE_BUFFER_LEN];
-    while ((int32_t)(deadline - dmosi_get_tick_count()) > 0)
+    for (;;)
     {
-        size_t received = dmnetif_receive(iface, buffer, sizeof(buffer));
-        if (received > 0 && parse_reply_frame(buffer, received, ip, mac))
-        {
-            cache_insert(iface, ip, mac);
-            return 0;
-        }
+        int32_t remaining = (int32_t)(deadline - dmosi_get_tick_count());
+        if (remaining <= 0)
+            break;
 
-        dmosi_thread_sleep(DMARP_POLL_INTERVAL_MS);
+        dmosi_semaphore_wait(g_reply_signal, 1, remaining);
+
+        if (cache_lookup(iface, ip, mac))
+            return 0;
     }
 
     return -ETIMEDOUT;
+}
+
+/**
+ * @brief Implementation of dmarp_note_frame() - see dmarp.h
+ */
+dmod_dmarp_api_declaration(1.0, void, _note_frame, ( dmnetif_iface_t iface, const uint8_t* frame, size_t frame_len ))
+{
+    if (iface == NULL || frame == NULL)
+        return;
+
+    dmroute_addr_t sender_ip;
+    dmnetif_mac_addr_t sender_mac;
+    if (!parse_sender_from_frame(frame, frame_len, &sender_ip, &sender_mac))
+        return;
+
+    cache_insert(iface, &sender_ip, &sender_mac);
+    dmosi_semaphore_post(g_reply_signal, 1);
 }
 
 /* ---- Cache ---- */

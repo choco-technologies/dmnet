@@ -38,7 +38,7 @@ extern "C" {
  * dmudp_receive() handles either family from the start.
  *
  * dmudp is stateless: every call is a one-shot send or a one-shot
- * poll-and-parse. There is no socket/bind concept - a caller that wants
+ * wait-and-parse. There is no socket/bind concept - a caller that wants
  * one can build it on top of dmudp_send()/_receive() (e.g. filtering
  * received segments by `out_dst_port` itself), the same way dmudp itself
  * is built on top of dmip rather than dmip growing a socket layer.
@@ -130,9 +130,10 @@ dmod_dmudp_api(1.0, bool, _v6_checksum_valid, ( const dmip_addr_t* src_ip, const
 dmod_dmudp_api(1.0, int, _send, ( const dmip_addr_t* dst_ip, uint16_t dst_port, uint16_t src_port, const void* payload, size_t payload_len, uint32_t arp_timeout_ms ));
 
 /**
- * @brief Receive one UDP datagram of either family on `iface`, if one is available
+ * @brief Receive one UDP datagram of either family, if one is available
  *
- * Built on dmip_receive() - a single dmnetif_receive() call covering
+ * Built on dmip_receive(), which waits (push-based, fed by dmnetbridge -
+ * see dmip.c's "Receive queue" section) on any interface for a packet of
  * either family - checks the packet's protocol is DMIP_PROTO_UDP,
  * verifies the checksum (dmudp_v4_checksum_valid()/_v6_checksum_valid()
  * depending on `*out_family`), and copies out just the UDP payload - the
@@ -141,11 +142,13 @@ dmod_dmudp_api(1.0, int, _send, ( const dmip_addr_t* dst_ip, uint16_t dst_port, 
  * There is no separate dmudp_v4_receive()/_v6_receive(): unlike sending,
  * where the caller already knows the destination family up front,
  * *receiving* has no such split to key a function name off in the first
- * place - which family arrives is exactly what polling is trying to find
+ * place - which family arrives is exactly what waiting is trying to find
  * out, so it can only ever be an output, never a choice of which
  * function to call.
  *
- * @param iface           Interface to poll
+ * @param timeout_ms      Milliseconds to wait for a datagram if none is
+ *                         already queued. 0 checks once and returns
+ *                         immediately without waiting
  * @param out_family      Output: dmip_family_v4 or _v6, whichever the
  *                         datagram arrived as - only meaningful when this
  *                         returns 0
@@ -156,15 +159,15 @@ dmod_dmudp_api(1.0, int, _send, ( const dmip_addr_t* dst_ip, uint16_t dst_port, 
  *                         payload. Owned by the caller - release with
  *                         Dmod_Free() when done
  * @param out_payload_len Output: length of `*out_payload` in bytes
+ * @param out_iface       Output: the interface the datagram arrived on.
+ *                         Optional - pass NULL if not needed
  *
- * @return 0 if a datagram was received, -EAGAIN if no frame was currently
- *         pending on `iface`, -EPROTO if a packet was received but wasn't
- *         UDP (or wasn't a well-formed IPv4/IPv6 packet), -EBADMSG if the
- *         checksum didn't match, -EINPROGRESS if the underlying IP packet
- *         is still being reassembled, -ENOMEM if a required allocation
- *         failed
+ * @return 0 if a datagram was received, -EAGAIN if none arrived within
+ *         `timeout_ms`, -EPROTO if a packet was received but wasn't UDP
+ *         (or wasn't a well-formed IPv4/IPv6 packet), -EBADMSG if the
+ *         checksum didn't match, -ENOMEM if a required allocation failed
  */
-dmod_dmudp_api(1.0, int, _receive, ( dmnetif_iface_t iface, dmip_family_t* out_family, dmip_addr_t* out_src_ip, uint16_t* out_src_port, uint16_t* out_dst_port, uint8_t** out_payload, size_t* out_payload_len ));
+dmod_dmudp_api(1.0, int, _receive, ( uint32_t timeout_ms, dmip_family_t* out_family, dmip_addr_t* out_src_ip, uint16_t* out_src_port, uint16_t* out_dst_port, uint8_t** out_payload, size_t* out_payload_len, dmnetif_iface_t* out_iface ));
 
 #ifdef __cplusplus
 }

@@ -15,4 +15,8 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
 # dmroute/dmnetif/dmarp: fixture interfaces, routes and ARP cache entries
 # are seeded by hand so dmudp_send()'s full pipeline (through dmip) can
 # run without a real driver - see dmudp_test.c's file comment.
-target_link_libraries(${DMOD_MODULE_NAME} dmudp_if dmip_if dmroute_if dmnetif_if dmarp_if)
+# dmnetbridge: feed_udp_packet() drives dmip's packet_received DIF
+#              implementation directly via Dmod_GetNextDifModule()/
+#              Dmod_GetDifFunction(), the same way
+#              dmnetbridge_handle_netif_rx() itself does.
+target_link_libraries(${DMOD_MODULE_NAME} dmudp_if dmip_if dmroute_if dmnetif_if dmarp_if dmnetbridge_if)

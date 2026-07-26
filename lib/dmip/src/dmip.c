@@ -2,7 +2,7 @@
  * @file dmip.c
  * @brief DMOD IP protocol - Implementation
  *
- * Four loosely-coupled pieces live here:
+ * Five loosely-coupled pieces live here:
  *
  *  - The RFC 1071 checksum primitive (dmip_checksum()), used by the IPv4
  *    header build/verify/TTL-decrement functions - IPv6 has no header
@@ -19,19 +19,31 @@
  *    keyed by family + a packed (addresses, protocol, identification)
  *    key, guarded by g_reassembly_mutex - see "Reassembly" below).
  *
- *  - Send/receive (dmip_v4_send()/_receive(), dmip_v6_receive()): the only
- *    part of this file that reaches outside dmip itself - dmroute to pick
- *    an egress interface/gateway, dmarp to resolve a destination MAC, and
- *    dmnetif for the actual frame I/O. Stateless - every call is a
- *    one-shot send or a one-shot poll-and-parse, no globals of its own
- *    beyond what Reassembly and identification already keep.
+ *  - Send (dmip_v4_send()): the only part of dmip that still reaches
+ *    outside dmip itself for I/O, and only as far as dmnetbridge -
+ *    dmip_v4_get_source_address()/dmip_v4_send() no longer touch
+ *    dmroute/dmarp/dmnetif directly, they call
+ *    dmnetbridge_get_source_address()/dmnetbridge_send() once per
+ *    fragment. dmip only ever deals with IP addresses now; dmnetbridge
+ *    owns routing, ARP resolution, and the actual frame transmit.
+ *
+ *  - Receive: push-based, not polled. dmip implements dmnetbridge's
+ *    packet_received DIF (dmip_dmnetbridge_packet_received() below) -
+ *    called by dmnetbridge_handle_netif_rx() for every frame it reads off
+ *    any interface, from whatever thread is pumping that interface. It
+ *    checks the ethertype, strips the 14-byte L2 header, and feeds the
+ *    rest through the existing dmip_v4_reassemble()/_v6_reassemble() -
+ *    a completed packet is pushed onto g_rx_queue and its arrival
+ *    signaled (g_rx_signal), rather than returned directly, since the
+ *    caller of dmip_v4_receive()/_v6_receive()/_receive() is virtually
+ *    never the same thread that received the frame. See "Receive queue"
+ *    below.
  */
 #define DMOD_ENABLE_REGISTRATION    ON
 #include "dmod.h"
 #include "dmip.h"
-#include "dmroute.h"
+#include "dmnetbridge.h"
 #include "dmnetif.h"
-#include "dmarp.h"
 #include "dmlist.h"
 #include "dmosi.h"
 #include <string.h>
@@ -78,6 +90,38 @@ static dmosi_mutex_t     g_reassembly_mutex = NULL;
 static dmosi_mutex_t g_id_mutex = NULL;
 static uint16_t      g_v4_next_id = 0;
 static uint32_t      g_v6_next_id = 0;
+
+/**
+ * @brief One completed, reassembled IP packet waiting to be picked up by
+ *        dmip_v4_receive()/_v6_receive()/_receive()
+ *
+ * Heap-allocated, pushed by dmip_dmnetbridge_packet_received() (this
+ * module's packet_received DIF implementation), popped by whichever
+ * dmip_*_receive() call matches its family first - see "Receive queue"
+ * below.
+ */
+struct dmip_rx_entry
+{
+    dmip_family_t   family;
+    dmnetif_iface_t iface;
+    uint8_t*        packet;
+    size_t          length;
+};
+
+/**
+ * @brief Queue of dmip_rx_entry* waiting to be picked up - same shape as
+ *        dmdevfs.c's own hotplug-event queue (dmlist_context_t* +
+ *        dmosi_mutex_t + dmosi_semaphore_t, not a fixed-size dmosi_queue_t)
+ *        so a burst of arriving packets can never silently overflow a
+ *        hard-coded ring, only fail to grow on genuine OOM
+ */
+static dmlist_context_t* g_rx_queue = NULL;
+static dmosi_mutex_t     g_rx_mutex = NULL;
+
+/**
+ * @brief Posted once per entry pushed onto g_rx_queue
+ */
+static dmosi_semaphore_t g_rx_signal = NULL;
 
 /* ---- Checksum ---- */
 
@@ -930,50 +974,15 @@ dmod_dmip_api_declaration(1.0, int, _v6_reassemble, ( const uint8_t* fragment, s
 /* ============================================================================
  *                      Send / Receive
  *
- * The only part of dmip.c that reaches outside dmip itself: dmroute to
- * pick an egress interface/gateway, dmarp to resolve a destination MAC
- * (IPv4 only - see dmip_v6_receive()'s doc comment in dmip.h for why
- * there is no dmip_v6_send()), and dmnetif for the actual frame I/O.
+ * Send still reaches outside dmip, but only as far as dmnetbridge now
+ * (routing/ARP/frame I/O all moved there - see this file's top comment).
+ * Receive is push-based via dmnetbridge's packet_received DIF - see
+ * "Receive queue" further below.
  * ========================================================================== */
 
 #define DMIP_ETH_HEADER_LEN     14u
 #define DMIP_ETHERTYPE_IPV4     0x0800u
 #define DMIP_ETHERTYPE_IPV6     0x86DDu
-
-/* Generous headroom over a max Ethernet frame - other traffic on the
- * interface (not just IP) shows up through the same dmnetif_receive()
- * call, and a too-small buffer would silently mangle a legitimate larger
- * frame instead of just failing to parse. Heap-allocated (see
- * dmip_v4_receive()/_v6_receive()) rather than a local array - at 2048
- * bytes it would blow well past DMIP_STACK_SIZE if it were one. */
-#define DMIP_RECEIVE_BUFFER_LEN 2048u
-
-/**
- * @brief Look up the egress interface and next-hop address for `dst`
- *
- * Shared by dmip_v4_get_source_address() and dmip_v4_send() - both need
- * exactly this answer, just for different reasons (one to learn the
- * source address, the other to actually resolve/transmit through it).
- * Family-agnostic (dmroute itself is), even though only IPv4 callers
- * exist today.
- */
-static int resolve_egress(const dmip_addr_t* dst, dmnetif_iface_t* out_iface, dmip_addr_t* out_next_hop)
-{
-    dmroute_route_t route = dmroute_lookup(dst);
-    if (route == NULL)
-        return -ENETUNREACH;
-
-    dmnetif_iface_t iface = dmnetif_find_by_name(dmroute_get_iface_name(route));
-    if (iface == NULL)
-        return -ENODEV;
-
-    dmip_addr_t gateway = { 0 };
-    dmroute_get_gateway(route, &gateway);
-
-    *out_iface = iface;
-    *out_next_hop = (gateway.family != dmip_family_none) ? gateway : *dst;
-    return 0;
-}
 
 /**
  * @brief Implementation of dmip_v4_get_source_address() - see dmip.h
@@ -983,26 +992,18 @@ dmod_dmip_api_declaration(1.0, int, _v4_get_source_address, ( const dmip_addr_t*
     if (dst == NULL || out_src == NULL || dst->family != dmip_family_v4)
         return -EINVAL;
 
-    dmnetif_iface_t iface = NULL;
-    dmip_addr_t next_hop = { 0 };
-    int result = resolve_egress(dst, &iface, &next_hop);
-    if (result != 0)
-        return result;
-
-    dmnetif_get_ip_address(iface, out_src);
-    return 0;
+    return dmnetbridge_get_source_address(dst, out_src);
 }
 
 /**
- * @brief dmip_v4_fragment_func_t state for dmip_v4_send() - wraps each
- *        emitted IP fragment in a 14-byte Ethernet header and transmits it
+ * @brief dmip_v4_fragment_func_t state for dmip_v4_send() - transmits
+ *        each emitted IP fragment via dmnetbridge_send()
  */
 typedef struct
 {
-    dmnetif_iface_t    iface;
-    dmnetif_mac_addr_t local_mac;
-    dmnetif_mac_addr_t dst_mac;
-    int                result;    /**< First failure seen so far, or 0 */
+    const dmip_addr_t* dst;
+    uint32_t            arp_timeout_ms;
+    int                 result;    /**< First failure seen so far, or 0 */
 } send_v4_ctx_t;
 
 /**
@@ -1012,6 +1013,14 @@ typedef struct
  * attempting to send after something has already gone wrong - there is no
  * way to signal dmip_v4_fragment() to stop early (its callback returns
  * void), so this just makes every call after the first failure a no-op.
+ *
+ * Calls dmnetbridge_send() once per fragment rather than resolving the
+ * route/MAC once up front and reusing it for every fragment - a multi-
+ * fragment packet re-does that lookup once per fragment (cheap: an
+ * already-cached dmroute/dmarp lookup, not a fresh ARP round trip, unless
+ * the very first fragment's own resolution is still in flight). Accepted
+ * in exchange for dmip having zero knowledge of routing/interfaces/ARP -
+ * see this file's top comment.
  */
 static void send_v4_fragment(const uint8_t* fragment, size_t fragment_len, void* user_data)
 {
@@ -1019,23 +1028,7 @@ static void send_v4_fragment(const uint8_t* fragment, size_t fragment_len, void*
     if (ctx->result != 0)
         return;
 
-    size_t frame_len = DMIP_ETH_HEADER_LEN + fragment_len;
-    uint8_t* frame = Dmod_Malloc(frame_len);
-    if (frame == NULL)
-    {
-        ctx->result = -ENOMEM;
-        return;
-    }
-
-    memcpy(&frame[0], ctx->dst_mac.addr, DMNETIF_MAC_ADDR_LEN);
-    memcpy(&frame[6], ctx->local_mac.addr, DMNETIF_MAC_ADDR_LEN);
-    write_u16_be(&frame[12], DMIP_ETHERTYPE_IPV4);
-    memcpy(&frame[DMIP_ETH_HEADER_LEN], fragment, fragment_len);
-
-    if (dmnetif_send(ctx->iface, frame, frame_len) == 0)
-        ctx->result = -EIO;
-
-    Dmod_Free(frame);
+    ctx->result = dmnetbridge_send(ctx->dst, DMIP_ETHERTYPE_IPV4, fragment, fragment_len, ctx->arp_timeout_ms, NULL);
 }
 
 /**
@@ -1046,96 +1039,22 @@ dmod_dmip_api_declaration(1.0, int, _v4_send, ( const dmip_v4_header_t* header, 
     if (header == NULL || (payload == NULL && payload_len > 0) || header->dst.family != dmip_family_v4)
         return -EINVAL;
 
-    dmnetif_iface_t iface = NULL;
-    dmip_addr_t next_hop = { 0 };
-    int result = resolve_egress(&header->dst, &iface, &next_hop);
-    if (result != 0)
-        return result;
-
-    dmnetif_mac_addr_t dst_mac = { 0 };
-    if (dmarp_resolve(iface, &next_hop, &dst_mac, arp_timeout_ms) != 0)
-        return -EHOSTUNREACH;
-
     dmip_v4_header_t full_header = *header;
     if (full_header.src.family == dmip_family_none)
     {
-        dmnetif_get_ip_address(iface, &full_header.src); /* best-effort, same as dmarp_resolve()'s own local_ip */
+        dmnetbridge_get_source_address(&header->dst, &full_header.src); /* best-effort, same as dmnetbridge_send()'s own resolution */
     }
 
-    send_v4_ctx_t ctx = { .iface = iface, .dst_mac = dst_mac, .result = 0 };
-    dmnetif_get_mac_address(iface, &ctx.local_mac);
-
     uint16_t mtu = DMNETIF_DEFAULT_MTU;
-    dmnetif_get_mtu(iface, &mtu);
+    dmnetbridge_get_mtu(&header->dst, &mtu); /* best-effort - mtu keeps the default above on failure */
 
-    result = dmip_v4_fragment(&full_header, payload, payload_len, mtu, send_v4_fragment, &ctx);
+    send_v4_ctx_t ctx = { .dst = &header->dst, .arp_timeout_ms = arp_timeout_ms, .result = 0 };
+
+    int result = dmip_v4_fragment(&full_header, payload, payload_len, mtu, send_v4_fragment, &ctx);
     if (result != 0)
         return result;
 
     return ctx.result;
-}
-
-/**
- * @brief Function pointer type matching dmip_v4_reassemble()/_v6_reassemble()'s
- *        signature - lets receive_one_frame() dispatch to either without
- *        caring which
- */
-typedef int (*reassemble_func_t)( const uint8_t* fragment, size_t length, uint8_t** out_packet, size_t* out_length );
-
-/**
- * @brief Shared implementation behind dmip_v4_receive()/_v6_receive() -
- *        one dmnetif_receive() call, checked against a single expected
- *        ethertype, fed into `reassemble` on a match
- *
- * Not used by dmip_receive() (see dmip.h's doc comment on it) - that one
- * needs to check *both* ethertypes against the same received frame,
- * which this single-ethertype shape can't express.
- */
-static int receive_one_frame(dmnetif_iface_t iface, uint16_t expected_ethertype, reassemble_func_t reassemble, uint8_t** out_packet, size_t* out_length)
-{
-    uint8_t* frame = Dmod_Malloc(DMIP_RECEIVE_BUFFER_LEN);
-    if (frame == NULL)
-        return -ENOMEM;
-
-    size_t frame_len = dmnetif_receive(iface, frame, DMIP_RECEIVE_BUFFER_LEN);
-    int result;
-    if (frame_len == 0)
-    {
-        result = -EAGAIN;
-    }
-    else if (frame_len < DMIP_ETH_HEADER_LEN || read_u16_be(&frame[12]) != expected_ethertype)
-    {
-        result = -EPROTO;
-    }
-    else
-    {
-        result = reassemble(frame + DMIP_ETH_HEADER_LEN, frame_len - DMIP_ETH_HEADER_LEN, out_packet, out_length);
-    }
-
-    Dmod_Free(frame);
-    return result;
-}
-
-/**
- * @brief Implementation of dmip_v4_receive() - see dmip.h
- */
-dmod_dmip_api_declaration(1.0, int, _v4_receive, ( dmnetif_iface_t iface, uint8_t** out_packet, size_t* out_length ))
-{
-    if (iface == NULL || out_packet == NULL || out_length == NULL)
-        return -EINVAL;
-
-    return receive_one_frame(iface, DMIP_ETHERTYPE_IPV4, dmip_v4_reassemble, out_packet, out_length);
-}
-
-/**
- * @brief Implementation of dmip_v6_receive() - see dmip.h
- */
-dmod_dmip_api_declaration(1.0, int, _v6_receive, ( dmnetif_iface_t iface, uint8_t** out_packet, size_t* out_length ))
-{
-    if (iface == NULL || out_packet == NULL || out_length == NULL)
-        return -EINVAL;
-
-    return receive_one_frame(iface, DMIP_ETHERTYPE_IPV6, dmip_v6_reassemble, out_packet, out_length);
 }
 
 /**
@@ -1160,60 +1079,207 @@ dmod_dmip_api_declaration(1.0, int, _send, ( const dmip_header_t* header, const 
     }
 }
 
-/**
- * @brief Implementation of dmip_receive() - see dmip.h
+/* ============================================================================
+ *                      Receive queue
  *
- * Can't share receive_one_frame() (single expected ethertype) - this one
- * accepts either and reports back which it got, so the ethertype check
- * is inlined here instead.
+ * dmip_dmnetbridge_packet_received() (this module's implementation of
+ * dmnetbridge's packet_received DIF) is called by whichever thread is
+ * pumping a given interface (dmnetbridge_handle_netif_rx(), run by
+ * networkd) - so a completed packet can't just be returned to a caller
+ * that isn't there. It's pushed onto g_rx_queue and g_rx_signal posted
+ * instead; dmip_v4_receive()/_v6_receive()/_receive() wait on that
+ * signal (with the caller's own timeout) and scan the queue for an entry
+ * matching the family they care about.
+ * ========================================================================== */
+
+/**
+ * @brief Push a completed packet onto g_rx_queue and wake any waiter
+ *
+ * Takes ownership of `packet` - frees it itself if the queue entry
+ * couldn't be allocated/pushed, so the caller never has to.
  */
-dmod_dmip_api_declaration(1.0, int, _receive, ( dmnetif_iface_t iface, dmip_family_t* out_family, uint8_t** out_packet, size_t* out_length ))
+static void push_rx_entry(dmip_family_t family, dmnetif_iface_t iface, uint8_t* packet, size_t length)
 {
-    if (iface == NULL || out_family == NULL || out_packet == NULL || out_length == NULL)
-        return -EINVAL;
-
-    uint8_t* frame = Dmod_Malloc(DMIP_RECEIVE_BUFFER_LEN);
-    if (frame == NULL)
-        return -ENOMEM;
-
-    size_t frame_len = dmnetif_receive(iface, frame, DMIP_RECEIVE_BUFFER_LEN);
-    int result;
-    if (frame_len == 0)
+    struct dmip_rx_entry* entry = Dmod_Malloc(sizeof(*entry));
+    if (entry == NULL)
     {
-        result = -EAGAIN;
+        Dmod_Free(packet);
+        return;
     }
-    else if (frame_len < DMIP_ETH_HEADER_LEN)
+
+    entry->family = family;
+    entry->iface = iface;
+    entry->packet = packet;
+    entry->length = length;
+
+    dmosi_mutex_lock(g_rx_mutex);
+    bool pushed = dmlist_push_back(g_rx_queue, entry);
+    dmosi_mutex_unlock(g_rx_mutex);
+
+    if (pushed)
     {
-        result = -EPROTO;
+        dmosi_semaphore_post(g_rx_signal, 1);
     }
     else
     {
-        uint16_t ethertype = read_u16_be(&frame[12]);
-        if (ethertype == DMIP_ETHERTYPE_IPV4)
+        Dmod_Free(entry->packet);
+        Dmod_Free(entry);
+    }
+}
+
+/**
+ * @brief dmip_family_t predicate type used by pop_rx_entry() to select
+ *        which queued entry a given dmip_*_receive() call wants
+ */
+typedef bool (*family_match_func_t)( dmip_family_t family );
+
+static bool match_v4(dmip_family_t family) { return family == dmip_family_v4; }
+static bool match_v6(dmip_family_t family) { return family == dmip_family_v6; }
+static bool match_any(dmip_family_t family) { (void)family; return true; }
+
+/**
+ * @brief Pop the first queued entry matching `match`, if any
+ *
+ * `out_iface` is optional (pass NULL if the caller doesn't want it) - see
+ * dmip_v4_receive()/_v6_receive()/_receive()'s own `out_iface` parameter.
+ *
+ * @return true if a matching entry was found and popped
+ */
+static bool pop_rx_entry(family_match_func_t match, dmip_family_t* out_family, dmnetif_iface_t* out_iface, uint8_t** out_packet, size_t* out_length)
+{
+    dmosi_mutex_lock(g_rx_mutex);
+
+    bool found = false;
+    for (size_t i = 0; i < dmlist_size(g_rx_queue) && !found; i++)
+    {
+        struct dmip_rx_entry* entry = (struct dmip_rx_entry*)dmlist_get(g_rx_queue, i);
+        if (entry != NULL && match(entry->family))
         {
-            *out_family = dmip_family_v4;
-            result = dmip_v4_reassemble(frame + DMIP_ETH_HEADER_LEN, frame_len - DMIP_ETH_HEADER_LEN, out_packet, out_length);
-        }
-        else if (ethertype == DMIP_ETHERTYPE_IPV6)
-        {
-            *out_family = dmip_family_v6;
-            result = dmip_v6_reassemble(frame + DMIP_ETH_HEADER_LEN, frame_len - DMIP_ETH_HEADER_LEN, out_packet, out_length);
-        }
-        else
-        {
-            result = -EPROTO;
+            dmlist_remove_at(g_rx_queue, i);
+
+            *out_family = entry->family;
+            if (out_iface != NULL)
+            {
+                *out_iface = entry->iface;
+            }
+            *out_packet = entry->packet;
+            *out_length = entry->length;
+            Dmod_Free(entry);
+            found = true;
         }
     }
 
-    Dmod_Free(frame);
-    return result;
+    dmosi_mutex_unlock(g_rx_mutex);
+    return found;
+}
+
+/**
+ * @brief Shared implementation behind dmip_v4_receive()/_v6_receive()/
+ *        _receive() - wait on g_rx_signal up to `timeout_ms`, re-checking
+ *        the queue for a `match`-ing entry every time it wakes
+ */
+static int wait_for_rx_entry(family_match_func_t match, uint32_t timeout_ms, dmip_family_t* out_family, dmnetif_iface_t* out_iface, uint8_t** out_packet, size_t* out_length)
+{
+    uint32_t deadline = dmosi_get_tick_count() + timeout_ms;
+
+    for (;;)
+    {
+        if (pop_rx_entry(match, out_family, out_iface, out_packet, out_length))
+            return 0;
+
+        int32_t remaining = (int32_t)(deadline - dmosi_get_tick_count());
+        if (remaining <= 0)
+            break;
+
+        dmosi_semaphore_wait(g_rx_signal, 1, remaining);
+    }
+
+    return -EAGAIN;
+}
+
+/**
+ * @brief Implementation of dmip_v4_receive() - see dmip.h
+ */
+dmod_dmip_api_declaration(1.0, int, _v4_receive, ( uint32_t timeout_ms, uint8_t** out_packet, size_t* out_length, dmnetif_iface_t* out_iface ))
+{
+    if (out_packet == NULL || out_length == NULL)
+        return -EINVAL;
+
+    dmip_family_t family;
+    return wait_for_rx_entry(match_v4, timeout_ms, &family, out_iface, out_packet, out_length);
+}
+
+/**
+ * @brief Implementation of dmip_v6_receive() - see dmip.h
+ */
+dmod_dmip_api_declaration(1.0, int, _v6_receive, ( uint32_t timeout_ms, uint8_t** out_packet, size_t* out_length, dmnetif_iface_t* out_iface ))
+{
+    if (out_packet == NULL || out_length == NULL)
+        return -EINVAL;
+
+    dmip_family_t family;
+    return wait_for_rx_entry(match_v6, timeout_ms, &family, out_iface, out_packet, out_length);
+}
+
+/**
+ * @brief Implementation of dmip_receive() - see dmip.h
+ */
+dmod_dmip_api_declaration(1.0, int, _receive, ( uint32_t timeout_ms, dmip_family_t* out_family, uint8_t** out_packet, size_t* out_length, dmnetif_iface_t* out_iface ))
+{
+    if (out_family == NULL || out_packet == NULL || out_length == NULL)
+        return -EINVAL;
+
+    return wait_for_rx_entry(match_any, timeout_ms, out_family, out_iface, out_packet, out_length);
+}
+
+/**
+ * @brief Implementation of dmip's packet_received DIF - see dmnetbridge.h
+ *
+ * Checks the ethertype, strips the 14-byte L2 header, and feeds the rest
+ * through dmip_v4_reassemble()/_v6_reassemble() unchanged (same logic
+ * dmip_v4_receive()/_v6_receive() used to run inline). A completed packet
+ * is pushed onto g_rx_queue (push_rx_entry()); anything else (a different
+ * ethertype, a still-incomplete reassembly, or a malformed/rejected
+ * packet) is silently dropped, same as before.
+ */
+dmod_dmnetbridge_dif_api_declaration(1.0, dmip, void, _packet_received, ( dmnetif_iface_t iface, const uint8_t* frame, size_t frame_len ))
+{
+    if (frame == NULL || frame_len < DMIP_ETH_HEADER_LEN)
+        return;
+
+    uint16_t ethertype = read_u16_be(&frame[12]);
+
+    dmip_family_t family;
+    int result;
+    uint8_t* packet = NULL;
+    size_t length = 0;
+
+    if (ethertype == DMIP_ETHERTYPE_IPV4)
+    {
+        family = dmip_family_v4;
+        result = dmip_v4_reassemble(frame + DMIP_ETH_HEADER_LEN, frame_len - DMIP_ETH_HEADER_LEN, &packet, &length);
+    }
+    else if (ethertype == DMIP_ETHERTYPE_IPV6)
+    {
+        family = dmip_family_v6;
+        result = dmip_v6_reassemble(frame + DMIP_ETH_HEADER_LEN, frame_len - DMIP_ETH_HEADER_LEN, &packet, &length);
+    }
+    else
+    {
+        return;
+    }
+
+    if (result != 0)
+        return; /* -EINPROGRESS (still reassembling) or a malformed/rejected fragment - nothing to queue either way */
+
+    push_rx_entry(family, iface, packet, length);
 }
 
 /* ---- DMOD lifecycle ---- */
 
 /**
- * @brief Module initialization - allocates the reassembly table and its
- *        guarding mutexes
+ * @brief Module initialization - allocates the reassembly table, the
+ *        receive queue, and their guarding mutexes/semaphore
  */
 int dmod_init(const Dmod_Config_t *Config)
 {
@@ -1222,7 +1288,13 @@ int dmod_init(const Dmod_Config_t *Config)
     g_reassembly = dmlist_create(Dmod_GetCurrentAllocatorName());
     g_reassembly_mutex = dmosi_mutex_create(false);
     g_id_mutex = dmosi_mutex_create(false);
-    if (g_reassembly == NULL || g_reassembly_mutex == NULL || g_id_mutex == NULL)
+    g_rx_queue = dmlist_create(Dmod_GetCurrentAllocatorName());
+    g_rx_mutex = dmosi_mutex_create(false);
+    g_rx_signal = dmosi_semaphore_create(0, UINT32_MAX);
+    if (
+        g_reassembly == NULL || g_reassembly_mutex == NULL || g_id_mutex == NULL
+     || g_rx_queue == NULL || g_rx_mutex == NULL || g_rx_signal == NULL
+        )
     {
         DMOD_LOG_ERROR("Failed to allocate dmip state\n");
         return -1;
@@ -1236,8 +1308,9 @@ int dmod_init(const Dmod_Config_t *Config)
 }
 
 /**
- * @brief Module deinitialization - frees every in-progress reassembly,
- *        then the table and its mutexes
+ * @brief Module deinitialization - frees every in-progress reassembly and
+ *        every queued-but-unclaimed received packet, then the tables,
+ *        mutexes and semaphore
  */
 int dmod_deinit(void)
 {
@@ -1253,6 +1326,21 @@ int dmod_deinit(void)
     g_reassembly_mutex = NULL;
     dmosi_mutex_destroy(g_id_mutex);
     g_id_mutex = NULL;
+
+    size_t rx_count = dmlist_size(g_rx_queue);
+    for (size_t i = 0; i < rx_count; i++)
+    {
+        struct dmip_rx_entry* entry = (struct dmip_rx_entry*)dmlist_pop_front(g_rx_queue);
+        Dmod_Free(entry->packet);
+        Dmod_Free(entry);
+    }
+    dmlist_destroy(g_rx_queue);
+    g_rx_queue = NULL;
+
+    dmosi_mutex_destroy(g_rx_mutex);
+    g_rx_mutex = NULL;
+    dmosi_semaphore_destroy(g_rx_signal);
+    g_rx_signal = NULL;
 
     DMOD_LOG_INFO("DMIP deinitialized\n");
     return 0;

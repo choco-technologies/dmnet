@@ -13,8 +13,9 @@ set(DMOD_DMR_PATH           ${CMAKE_CURRENT_SOURCE_DIR}/dmip.dmr)
 # List of MAL interfaces implemented by this module (leave empty if none)
 set(DMOD_MAL_IMPLS          )
 
-# List of DIF interfaces implemented by this module (leave empty if none)
-set(DMOD_DIF_IMPLS          )
+# List of DIF interfaces implemented by this module (leave empty if none) -
+# dmip implements dmnetbridge's packet_received DIF (see src/dmip.c).
+set(DMOD_DIF_IMPLS          dmnetbridge)
 
 #
 #   dmod_add_library - create a library module
@@ -31,22 +32,26 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# dmroute, dmnetif, dmarp: in-tree siblings under dmnet/lib (added earlier
-# via the top-level add_subdirectory(lib), in the order dmroute -> dmnetif
-# -> dmarp -> dmip - see dmnet/CMakeLists.txt and lib/CMakeLists.txt), not
-# separately published modules, so they're linked directly rather than
-# through dmod_link_modules() (which fetches a *released* module's headers
-# via dmf-get and would fail here since none of them has such a release) -
-# same convention tools/ifconfig/CMakeLists.txt uses for dmnetif.
-#   dmroute: dmroute_addr_t (re-exported as dmip_addr_t - see dmip.h), and
-#            dmroute_lookup() to pick an egress interface/gateway when
-#            sending - see dmip_v4_send()/_get_source_address() in src/dmip.c
-#   dmnetif: dmnetif_send()/_receive() for actual frame I/O, dmnetif_get_mtu()
-#            to size fragments, dmnetif_get_ip_address() for source address
-#            selection
-#   dmarp:   dmarp_resolve() to find the next-hop MAC before dmip_v4_send()
-#            builds an Ethernet frame
-target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if dmarp_if)
+# dmroute, dmnetif, dmnetbridge: in-tree siblings under dmnet/lib (added
+# earlier via the top-level add_subdirectory(lib), in the order dmroute ->
+# dmnetif -> dmarp -> dmnetbridge -> dmip - see dmnet/CMakeLists.txt and
+# lib/CMakeLists.txt), not separately published modules, so they're linked
+# directly rather than through dmod_link_modules() (which fetches a
+# *released* module's headers via dmf-get and would fail here since none
+# of them has such a release) - same convention lib/dmarp/CMakeLists.txt
+# uses for dmnetif.
+#   dmroute:      header-only - dmip.h needs dmroute_addr_t (re-exported as
+#                 dmip_addr_t) directly, even though dmip.c itself no
+#                 longer calls any dmroute_* function (that moved to
+#                 dmnetbridge - see src/dmip.c's top comment)
+#   dmnetif:      header-only - dmip.h needs dmnetif_iface_t for the
+#                 optional out_iface parameter on dmip_v4_receive()/
+#                 _v6_receive()/_receive(), even though dmip.c itself never
+#                 calls a dmnetif_* function directly anymore
+#   dmnetbridge:  dmnetbridge_send()/_get_source_address()/_get_mtu() for
+#                 dmip_v4_send(), and the packet_received DIF declaration
+#                 dmip implements - see src/dmip.c
+target_link_libraries(${DMOD_MODULE_NAME} dmroute_if dmnetif_if dmnetbridge_if)
 
 # dmlist: backs the fragment reassembly table
 # dmosi:  mutexes guarding reassembly/identification state, plus

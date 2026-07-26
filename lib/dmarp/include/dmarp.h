@@ -27,12 +27,21 @@ extern "C" {
  * not ARP, so every function here only ever deals with
  * dmroute_family_v4 addresses.
  *
- * dmarp depends on dmnetif (to send/receive frames and read an
- * interface's own MAC/IP address) and dmroute (for dmroute_addr_t) -
- * dmip depends on dmarp in turn (to resolve a destination MAC before
- * sending), not the other way around, so this stays a plain one-way
- * dependency chain, not a DIF/MAL. There is exactly one ARP cache per
- * system - functions here are plain Built-in API (dmod_dmarp_api).
+ * dmarp depends on dmnetif (to send frames and read an interface's own
+ * MAC/IP address) and dmroute (for dmroute_addr_t) - dmnetbridge depends
+ * on dmarp in turn (to resolve a destination MAC before sending, and to
+ * feed it every received frame - see dmarp_note_frame()), not the other
+ * way around, so this stays a plain one-way dependency chain, not a
+ * DIF/MAL. There is exactly one ARP cache per system - functions here are
+ * plain Built-in API (dmod_dmarp_api).
+ *
+ * dmarp does not read frames off the wire itself: since dmnetbridge's
+ * per-interface RX pump (see its own docs) is the only code path allowed
+ * to call dmnetif_receive() on a given interface once networkd owns it,
+ * dmarp_resolve() cannot poll for a reply on its own anymore - it sends
+ * its request, then waits on a signal that dmarp_note_frame() raises
+ * whenever *any* ARP frame comes in through dmnetbridge, re-checking the
+ * cache each time it wakes. See dmarp_note_frame()'s own doc comment.
  */
 
 /**
@@ -64,10 +73,11 @@ extern "C" {
  *
  * Checks the cache first; on a hit, `mac` is filled in immediately and no
  * frame is sent (`timeout_ms` is ignored). On a miss, sends one ARP
- * request out `iface` and polls dmnetif_receive() for a matching reply
- * (an ARP-opcode-reply frame whose sender protocol address equals `ip`)
- * until either a reply arrives or `timeout_ms` elapses. A successful
- * reply is cached (dmarp_cache_insert()) before returning.
+ * request out `iface` and waits for dmarp_note_frame() to observe a
+ * matching reply and cache it (see that function - it's fed every
+ * received frame by dmnetbridge's per-interface RX pump, the only code
+ * path allowed to actually read from `iface`), re-checking the cache each
+ * time it's woken, until either a match appears or `timeout_ms` elapses.
  *
  * Sends exactly one request - no retries. A caller that wants retry
  * behavior can just call dmarp_resolve() again after a timeout.
@@ -91,6 +101,31 @@ extern "C" {
  *         -ETIMEDOUT no matching reply arrived within `timeout_ms`
  */
 dmod_dmarp_api(1.0, int, _resolve, ( dmnetif_iface_t iface, const dmroute_addr_t* ip, dmnetif_mac_addr_t* mac, uint32_t timeout_ms ));
+
+/**
+ * @brief Feed one received frame to dmarp for opportunistic ARP learning
+ *
+ * Called by dmnetbridge's per-interface RX pump (dmnetbridge_handle_netif_rx())
+ * for *every* frame it reads off `iface`, not just ones dmarp_resolve() is
+ * actively waiting on - a plain Built-in API call, not a DIF, since
+ * dmnetbridge already hard-depends on dmarp for dmarp_resolve() itself.
+ *
+ * Frames that aren't a well-formed ARP request or reply are silently
+ * ignored. Otherwise the sender's (interface, IP) -> MAC mapping is cached
+ * (dmarp_cache_insert(), same TTL as any other entry) regardless of
+ * opcode or who the frame was addressed to - both a request and a reply
+ * carry a usable sender address, and caching from a request too (not just
+ * replies to our own dmarp_resolve() calls) is what lets repeated sends to
+ * a peer we've merely *heard from* skip a fresh ARP round trip. Any
+ * pending dmarp_resolve() call on any interface is then woken to
+ * re-check the cache.
+ *
+ * @param iface     Interface the frame was received on
+ * @param frame     Received frame bytes (full Ethernet frame, as passed to
+ *                   dmnetif_receive())
+ * @param frame_len Number of valid bytes in `frame`
+ */
+dmod_dmarp_api(1.0, void, _note_frame, ( dmnetif_iface_t iface, const uint8_t* frame, size_t frame_len ));
 
 /* ============================================================================
  *                      Cache

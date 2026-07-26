@@ -104,9 +104,24 @@ Ethernet payload size) until `dmnetif_set_mtu()` changes it.
 
 `dmnetif_send()`/`dmnetif_receive()` move one whole frame per call,
 mirroring the underlying `dmdrvi` driver's `write()`/`read()` contract.
-`dmnetif_receive()` is non-blocking, returning 0 immediately if nothing is
-pending - a consumer that needs to wait (e.g. a network stack's RX task)
-polls on its own schedule.
+`dmnetif_receive()` is documented as non-blocking, returning 0 immediately
+if nothing is pending, but this is only as good as the driver behind it:
+`dmeth`'s own `_receive_frame()` actually blocks indefinitely waiting on
+an RX-ISR-posted semaphore (dmdrvi has no `O_NONBLOCK`/timeout concept to
+plumb through - see `dmeth_port.h`). In practice this is fine because
+exactly one thread is meant to ever call `dmnetif_receive()` on a given
+interface: `dmnetbridge_handle_netif_rx()` (run by the `networkd`
+service), in its own dedicated thread per interface, is happy to block
+there - see [dmnetbridge's docs](../../dmnetbridge/docs/dmnetbridge.md).
+A second caller polling the same interface concurrently would race it.
+
+## Interface presence
+
+`dmnetif_is_present(iface)` checks whether the interface's backing devfs
+file still exists (e.g. a hot-unplugged driver that removed its device
+node), distinct from `dmnetif_is_up()`'s administrative up/down state.
+`dmnetbridge_handle_netif_rx()`'s pump loop uses this to know when to stop
+reading from an interface and let the thread pumping it end.
 
 ## Statistics
 

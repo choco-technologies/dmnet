@@ -39,7 +39,7 @@ carries it one step further and drops the per-family functions
 altogether rather than keeping them *and* a wrapper on top.
 
 Receiving is, if anything, an even clearer case: which family a datagram
-turns out to be *is* the thing polling is trying to discover, so it was
+turns out to be *is* the thing waiting is trying to discover, so it was
 never something a caller could have picked by calling a specific function
 in the first place - `dmudp_receive()` reports it back via `out_family`.
 
@@ -101,12 +101,14 @@ function needed.
 ## No socket layer
 
 dmudp is stateless - there is no `dmudp_socket_create()`/`bind()`/`close()`,
-no per-port registry, no receive queue. Every call is a one-shot send or a
-one-shot poll-and-parse, the same shape `dmip_send()`/`_receive()` already
-have. A caller that wants a socket-like abstraction (bind to a port,
-dispatch received datagrams by destination port) can build it on top of
-`dmudp_receive()`'s `out_dst_port` - the same way dmudp itself is built on
-top of dmip rather than dmip growing transport-layer state.
+no per-port registry, no receive queue of its own (it waits on dmip's
+internal one, but has no state of its own to guard). Every call is a
+one-shot send or a one-shot wait-and-parse, the same shape
+`dmip_send()`/`_receive()` already have. A caller that wants a socket-like
+abstraction (bind to a port, dispatch received datagrams by destination
+port) can build it on top of `dmudp_receive()`'s `out_dst_port` - the same
+way dmudp itself is built on top of dmip rather than dmip growing
+transport-layer state.
 
 ## Byte buffers, not packed structs
 
@@ -120,4 +122,6 @@ module runtime gives no struct-packing guarantee.
   `dmip_checksum()` for the pseudo-header checksum and
   `dmip_v4_get_source_address()`/`_v4_next_identification()`
 - `dmroute` - `dmip_addr_t`'s real definition (`dmroute_addr_t`)
-- `dmnetif` - `dmnetif_iface_t`, the interface `dmudp_receive()` polls
+- `dmnetif` - header-only: `dmnetif_iface_t` for `dmudp_receive()`'s
+  optional `out_iface` parameter. dmudp.c never calls a `dmnetif_*`
+  function directly - `dmip_receive()` already does all frame I/O

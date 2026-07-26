@@ -13,7 +13,9 @@ request every time.
 
 ```
 ┌──────────────────────────────────────────────┐
-│         TCP/IP stack (networkd) / ...         │
+│                DMNETBRIDGE                    │
+│   (routing/ARP/frame I/O for dmip, driven     │
+│    by networkd - see lib/dmnetbridge)         │
 ├──────────────────────────────────────────────┤
 │                  DMARP                        │
 │   resolve (cache + request/reply exchange),   │
@@ -40,10 +42,18 @@ deals with `dmroute_family_v4` addresses.
    see "Frame format" below) to build the request.
 2. Sends one ARP request frame (`dmnetif_send()`) - broadcast destination,
    opcode 1 ("who has").
-3. Polls `dmnetif_receive()` (every 10ms) until either a frame matching
-   the request arrives (ARP, opcode 2 "is at", sender protocol address ==
-   the address being resolved) or `timeout_ms` elapses.
-4. Caches a successful reply (`dmarp_cache_insert()`) before returning.
+3. Waits for `dmarp_note_frame()` (see "Opportunistic learning" below) to
+   observe a matching reply and cache it, re-checking the cache itself
+   each time it's woken, until either a match appears or `timeout_ms`
+   elapses.
+4. Returns 0 once the cache lookup in step 3 succeeds.
+
+`dmarp_resolve()` does not read frames off the wire itself anymore: once
+`networkd` is running, `dmnetbridge_handle_netif_rx()` is the *only* code
+path allowed to call `dmnetif_receive()` on a given interface (see
+`dmnetbridge.h`) - a second concurrent reader would race it and starve.
+`dmarp_note_frame()` is that pump loop's way of feeding every frame it
+sees back to dmarp.
 
 Only one request is sent per `dmarp_resolve()` call - there is no
 built-in retry. A caller that wants retry behavior can simply call
@@ -51,10 +61,24 @@ built-in retry. A caller that wants retry behavior can simply call
 independent request/wait cycle (the first one having found nothing to
 cache).
 
-Every other frame that arrives on the interface while waiting - including
-other hosts' unrelated ARP traffic - is silently ignored; only a reply
-whose sender protocol address matches what was asked about is treated as
-a match.
+## Opportunistic learning
+
+`dmarp_note_frame(iface, frame, frame_len)` is called by
+`dmnetbridge_handle_netif_rx()` for *every* frame it reads off `iface`,
+not just ones a pending `dmarp_resolve()` call is waiting on - a plain
+Built-in API call, not a DIF, since dmnetbridge already hard-depends on
+dmarp for `dmarp_resolve()` itself. A well-formed ARP request or reply
+(either opcode, not just replies) has its sender's (interface, IP) -> MAC
+mapping cached unconditionally, then wakes any `dmarp_resolve()` call
+currently waiting to re-check the cache. Learning from requests too (not
+just replies to our own resolutions) is what lets repeated sends to a peer
+we've merely *heard from* - e.g. its own ARP broadcast to someone else -
+skip a fresh round trip entirely.
+
+Frames that aren't a well-formed ARP request or reply are silently
+ignored - the same tolerance the old poll loop had for "every other frame
+that arrives on the interface, including other hosts' unrelated ARP
+traffic."
 
 ## Cache
 
@@ -98,9 +122,11 @@ during DHCP), so this is not treated as an error.
 ## Dependencies
 
 - `dmroute` - the shared `dmroute_addr_t` type every address field uses
-- `dmnetif` - `dmnetif_send()`/`_receive()` to exchange frames,
-  `dmnetif_get_mac_address()`/`_get_ip_address()` to build a request,
-  `dmnetif_get_name()` to key cache entries.
+- `dmnetif` - `dmnetif_send()` to transmit a request,
+  `dmnetif_get_mac_address()`/`_get_ip_address()` to build one,
+  `dmnetif_get_name()` to key cache entries. `dmarp_resolve()` no longer
+  calls `dmnetif_receive()` itself - see "Resolution" above
 - `dmlist` - backs the cache
-- `dmosi` - mutex guarding the cache, plus `dmosi_get_tick_count()`/
-  `_thread_sleep()` for `dmarp_resolve()`'s reply poll loop
+- `dmosi` - mutex guarding the cache, plus `dmosi_get_tick_count()` for
+  cache TTLs and a semaphore (`g_reply_signal`) `dmarp_resolve()` waits on
+  and `dmarp_note_frame()` posts

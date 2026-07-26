@@ -89,27 +89,46 @@ reassembly table.
 
 ## Send / receive
 
-`dmip_v4_send()` is what actually gets a packet onto the wire:
-`dmroute_lookup()` picks the egress interface and next hop, `dmarp_resolve()`
-turns that next hop into a MAC address, and the packet (fragmented per the
-egress interface's MTU via the existing `dmip_v4_fragment()`) goes out
-through `dmnetif_send()` wrapped in a 14-byte Ethernet header built the
-same way `lib/dmarp/src/dmarp.c`'s `build_request_frame()` already does.
-If the caller left `header->src` unset, `dmip_v4_get_source_address()`
-fills it in from the egress interface - the same function is exposed
-publicly since a caller building a packet *on top of* dmip (a UDP
-checksum needs the source address before the segment can even be
-assembled) needs that answer before it can call `dmip_v4_send()` at all.
+dmip no longer touches routing, ARP, or raw frame I/O itself - all of that
+moved to [dmnetbridge](../../dmnetbridge), the layer between dmip's
+IP-address-level view of the world and the actual network interfaces.
 
-`dmip_v4_receive()`/`dmip_v6_receive()` are the mirror image: one
-non-blocking `dmnetif_receive()` call, an Ethertype check, strip the L2
-header, hand the rest to `dmip_v4_reassemble()`/`_v6_reassemble()`.
+`dmip_v4_send()` fills in `header->src` via `dmip_v4_get_source_address()`
+if left unset, reads the egress interface's MTU (best-effort, via
+`dmnetbridge_get_mtu()`), fragments the packet (the existing
+`dmip_v4_fragment()`), and hands each fragment to `dmnetbridge_send()`
+individually - which does the route lookup, ARP resolution, and Ethernet
+framing/transmit that used to live here. A multi-fragment packet therefore
+re-resolves the route/MAC once per fragment rather than once for the whole
+packet - a deliberate tradeoff for dmip having zero knowledge of
+interfaces/routing/ARP (see `send_v4_fragment()` in `src/dmip.c`).
+`dmip_v4_get_source_address()` itself is now a thin call to
+`dmnetbridge_get_source_address()`.
+
+Receiving is push-based, not polled: dmip implements dmnetbridge's
+`packet_received` DIF (`dmip_dmnetbridge_packet_received()` in
+`src/dmip.c`, following the naming dmod's DIF macros generate) - called by
+whichever thread is pumping *any* interface
+(`dmnetbridge_handle_netif_rx()`, run by the `networkd` service), for
+every frame it reads. The implementation checks the Ethertype, strips the
+14-byte L2 header, and feeds the rest through `dmip_v4_reassemble()`/
+`_v6_reassemble()` exactly as before - a completed packet is pushed onto
+an internal queue (`g_rx_queue`, guarded by a mutex and a semaphore,
+`g_rx_signal` - same shape as `dmdevfs.c`'s own hotplug-event queue, not a
+fixed-size ring) instead of being returned directly, since the caller of
+`dmip_v4_receive()`/`_v6_receive()`/`_receive()` is essentially never the
+same thread that received the frame. Those three functions wait on that
+queue up to a caller-supplied `timeout_ms`, scanning for an entry matching
+the family they want (v4-only / v6-only / either) - see "Receive queue" in
+`src/dmip.c` for the full picture. None of them take an interface
+parameter anymore; each has an optional `out_iface` instead, filled in
+with whichever interface the returned packet actually arrived on.
 
 There is no `dmip_v6_send()`: resolving a destination MAC for IPv6 uses
 NDP (RFC 4861), not ARP, and there is no NDP module in this tree yet -
 the same boundary `dmarp.h` documents for itself regarding IPv6. Once an
 NDP module exists, `dmip_v6_send()` can be added following the exact shape
-of `dmip_v4_send()`.
+of `dmip_v4_send()` (via `dmnetbridge_send()`, same as IPv4).
 
 ## Family-agnostic `dmip_send()`/`dmip_receive()`
 
@@ -124,15 +143,12 @@ dispatches to `dmip_v4_send()` itself, or `-ENOSYS` for `dmip_family_v6`
 until `dmip_v6_send()` exists.
 
 `dmip_receive()` is not just a convenience on the receive side - it fixes
-a real gap: `dmip_v4_receive()` and `dmip_v6_receive()` each make their
-*own* `dmnetif_receive()` call, so polling both every cycle risks losing
-a frame outright (whichever of the two happens to consume a frame of the
-*other* family gets it discarded as `-EPROTO`, and it's gone -
-`dmnetif_receive()` doesn't put a frame back). `dmip_receive()` makes
-exactly one `dmnetif_receive()` call, checks the Ethertype once, and
-dispatches to `dmip_v4_reassemble()`/`_v6_reassemble()` accordingly,
-reporting which family it got via an output parameter - no frame is ever
-at risk of being consumed by the wrong path.
+a real gap: `dmip_v4_receive()` and `dmip_v6_receive()` each only ever
+match their own family's queue entries, so polling both in a loop would
+starve whichever one is called second behind the first if packets of both
+families keep arriving. `dmip_receive()` waits on the same queue for
+*either* family and returns whichever was queued first, reporting which
+family it got via an output parameter.
 
 ## Byte buffers, not packed structs
 
@@ -144,13 +160,15 @@ would corrupt every packet silently.
 
 ## Dependencies
 
-- `dmroute` - the address type (re-exported as `dmip_addr_t`), and
-  `dmroute_lookup()` to pick an egress interface/gateway when sending
-- `dmnetif` - `dmnetif_send()`/`_receive()` for frame I/O,
-  `dmnetif_get_mtu()` to size fragments, `dmnetif_get_ip_address()` for
-  source address selection
-- `dmarp` - `dmarp_resolve()` to find the next-hop MAC before
-  `dmip_v4_send()` builds an Ethernet frame
-- `dmlist` - fragment reassembly bookkeeping
-- `dmosi` - mutexes guarding reassembly/identification state, plus
-  `dmosi_get_tick_count()` for reassembly timeouts
+- `dmroute` - header-only: the address type (re-exported as `dmip_addr_t`).
+  dmip.c itself never calls a `dmroute_*` function anymore - that moved to
+  dmnetbridge
+- `dmnetif` - header-only: `dmnetif_iface_t` for the optional `out_iface`
+  parameter on the receive functions. dmip.c never calls a `dmnetif_*`
+  function directly anymore either
+- `dmnetbridge` - `dmnetbridge_send()`/`_get_source_address()`/`_get_mtu()`
+  for `dmip_v4_send()`, and the `packet_received` DIF dmip implements for
+  receiving
+- `dmlist` - fragment reassembly bookkeeping, and the receive queue
+- `dmosi` - mutexes/semaphore guarding reassembly/identification/receive-
+  queue state, plus `dmosi_get_tick_count()` for reassembly timeouts

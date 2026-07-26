@@ -12,21 +12,33 @@
  * Send/receive steps register two "/null"-backed dmnetif fixture
  * interfaces (same pattern as lib/dmip/tests/dmip_test.c and
  * lib/dmarp/tests/dmarp_test.c) via dmod_test_setup()/_teardown(). No real
- * driver backs either fixture, so a full transmission/reception can't be
- * exercised end-to-end here - dmudp_send() is tested up through the point
+ * driver backs either fixture, so a full transmission can't be exercised
+ * end-to-end here - dmudp_send() is tested up through the point
  * dmip_send()/dmip_v4_send() itself can be tested without a driver (route
  * lookup, a hand-seeded ARP cache hit, segment building), failing only at
- * the final dmnetif_send(); dmudp_receive() is tested against "nothing
- * pending" (dmnetif_receive() always reports no frame without a real
- * driver).
+ * the final dmnetif_send().
+ *
+ * Receiving, on the other hand, *can* be exercised end-to-end without a
+ * real driver: dmip_receive() is push-based (fed by dmnetbridge's
+ * packet_received DIF, which dmip implements), so feed_udp_packet() below
+ * builds a complete, checksummed IPv4-UDP frame by hand and drives it
+ * straight into that DIF implementation via Dmod_GetNextDifModule()/
+ * Dmod_GetDifFunction() - the same discovery
+ * dmnetbridge_handle_netif_rx() itself uses (see
+ * dmnetbridge.c's broadcast_packet_received()), simulating what would
+ * happen after a real frame arrived. This requires ENABLE_DIF_REGISTRATIONS
+ * (see dmnetbridge.h's own doc comment on dmod_dmnetbridge_packet_received_sig)
+ * and linking dmnetbridge_if - same pattern lib/dmip/tests/dmip_test.c uses.
  *
  * Every step uses a distinct destination network, since dmroute's routes
  * and dmarp's cache are both global state that outlives a single step.
  */
+#define ENABLE_DIF_REGISTRATIONS ON
 #include "dmod_test.h"
 #include "dmudp.h"
 #include "dmroute.h"
 #include "dmarp.h"
+#include "dmnetbridge.h"
 #include <string.h>
 #include <errno.h>
 
@@ -55,6 +67,85 @@ static void write_u16_be(uint8_t* p, uint16_t value)
 {
     p[0] = (uint8_t)(value >> 8);
     p[1] = (uint8_t)(value & 0xFFu);
+}
+
+/* dmod modules have no libc memcmp() (see dmod/src/module/string.c's
+ * minimal replacement set) - a small manual comparison stands in for it. */
+static bool bytes_equal(const uint8_t* a, const uint8_t* b, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+    {
+        if (a[i] != b[i])
+            return false;
+    }
+    return true;
+}
+
+#define TEST_ETH_HEADER_LEN 14u
+#define TEST_ETHERTYPE_IPV4 0x0800u
+#define TEST_MAX_PAYLOAD_LEN 64u
+
+/**
+ * @brief Build a complete, checksummed IPv4 packet carrying a UDP segment,
+ *        wrap it in a minimal Ethernet frame, and broadcast it to every
+ *        packet_received DIF implementor (dmip's own, in practice, since
+ *        this binary doesn't link any other implementor) - the same
+ *        discovery dmnetbridge_handle_netif_rx() itself uses, see
+ *        dmnetbridge.c's broadcast_packet_received()
+ */
+static void feed_udp_packet(dmnetif_iface_t iface, dmip_addr_t src_ip, dmip_addr_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, size_t payload_len)
+{
+    size_t udp_len = DMUDP_HEADER_LEN + payload_len;
+
+    uint8_t segment[DMUDP_HEADER_LEN + TEST_MAX_PAYLOAD_LEN];
+    write_u16_be(&segment[0], src_port);
+    write_u16_be(&segment[2], dst_port);
+    write_u16_be(&segment[4], (uint16_t)udp_len);
+    write_u16_be(&segment[6], 0);
+    if (payload_len > 0)
+    {
+        memcpy(&segment[DMUDP_HEADER_LEN], payload, payload_len);
+    }
+
+    uint8_t pseudo_and_segment[12 + DMUDP_HEADER_LEN + TEST_MAX_PAYLOAD_LEN];
+    memcpy(&pseudo_and_segment[0], src_ip.addr.v4, DMIP_IPV4_ADDR_LEN);
+    memcpy(&pseudo_and_segment[4], dst_ip.addr.v4, DMIP_IPV4_ADDR_LEN);
+    pseudo_and_segment[8] = 0;
+    pseudo_and_segment[9] = DMIP_PROTO_UDP;
+    write_u16_be(&pseudo_and_segment[10], (uint16_t)udp_len);
+    memcpy(&pseudo_and_segment[12], segment, udp_len);
+    write_u16_be(&segment[6], dmip_checksum(pseudo_and_segment, 12 + udp_len));
+
+    dmip_v4_header_t header = { 0 };
+    header.total_length = (uint16_t)(DMIP_V4_HEADER_LEN + udp_len);
+    header.ttl = DMIP_DEFAULT_TTL;
+    header.protocol = DMIP_PROTO_UDP;
+    header.src = src_ip;
+    header.dst = dst_ip;
+
+    uint8_t packet[DMIP_V4_HEADER_LEN + DMUDP_HEADER_LEN + TEST_MAX_PAYLOAD_LEN];
+    dmip_v4_build_header(packet, sizeof(packet), &header);
+    memcpy(packet + DMIP_V4_HEADER_LEN, segment, udp_len);
+    size_t packet_len = DMIP_V4_HEADER_LEN + udp_len;
+
+    size_t frame_len = TEST_ETH_HEADER_LEN + packet_len;
+    uint8_t* frame = Dmod_Malloc(frame_len);
+    memset(frame, 0, TEST_ETH_HEADER_LEN);
+    write_u16_be(&frame[12], TEST_ETHERTYPE_IPV4);
+    memcpy(frame + TEST_ETH_HEADER_LEN, packet, packet_len);
+
+    Dmod_Context_t* implementor = NULL;
+    while ((implementor = Dmod_GetNextDifModule(dmod_dmnetbridge_packet_received_sig, implementor)) != NULL)
+    {
+        dmod_dmnetbridge_packet_received_t fn =
+            (dmod_dmnetbridge_packet_received_t)Dmod_GetDifFunction(implementor, dmod_dmnetbridge_packet_received_sig);
+        if (fn != NULL)
+        {
+            fn(iface, frame, frame_len);
+        }
+    }
+
+    Dmod_Free(frame);
 }
 
 #define TEST_DEVICE_PATH_0 "/null"
@@ -202,16 +293,15 @@ DMOD_TEST_STEP(receive_rejects_bad_arguments)
     uint8_t* payload = NULL;
     size_t payload_len = 0;
 
-    DMOD_TEST_EXPECT_EQ(dmudp_receive(NULL, &family, &src_ip, &src_port, &dst_port, &payload, &payload_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmudp_receive(g_iface0, NULL, &src_ip, &src_port, &dst_port, &payload, &payload_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmudp_receive(g_iface0, &family, NULL, &src_port, &dst_port, &payload, &payload_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmudp_receive(g_iface0, &family, &src_ip, NULL, &dst_port, &payload, &payload_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmudp_receive(g_iface0, &family, &src_ip, &src_port, NULL, &payload, &payload_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmudp_receive(g_iface0, &family, &src_ip, &src_port, &dst_port, NULL, &payload_len), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmudp_receive(g_iface0, &family, &src_ip, &src_port, &dst_port, &payload, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmudp_receive(0, NULL, &src_ip, &src_port, &dst_port, &payload, &payload_len, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmudp_receive(0, &family, NULL, &src_port, &dst_port, &payload, &payload_len, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmudp_receive(0, &family, &src_ip, NULL, &dst_port, &payload, &payload_len, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmudp_receive(0, &family, &src_ip, &src_port, NULL, &payload, &payload_len, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmudp_receive(0, &family, &src_ip, &src_port, &dst_port, NULL, &payload_len, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmudp_receive(0, &family, &src_ip, &src_port, &dst_port, &payload, NULL, NULL), -EINVAL);
 }
 
-DMOD_TEST_STEP(receive_no_pending_frame_returns_eagain)
+DMOD_TEST_STEP(receive_no_pending_datagram_returns_eagain)
 {
     dmip_family_t family = dmip_family_none;
     dmip_addr_t src_ip = { 0 };
@@ -219,5 +309,32 @@ DMOD_TEST_STEP(receive_no_pending_frame_returns_eagain)
     uint8_t* payload = NULL;
     size_t payload_len = 0;
 
-    DMOD_TEST_EXPECT_EQ(dmudp_receive(g_iface0, &family, &src_ip, &src_port, &dst_port, &payload, &payload_len), -EAGAIN);
+    DMOD_TEST_EXPECT_EQ(dmudp_receive(0, &family, &src_ip, &src_port, &dst_port, &payload, &payload_len, NULL), -EAGAIN);
+}
+
+DMOD_TEST_STEP(receive_returns_datagram_delivered_via_packet_received)
+{
+    dmip_addr_t src = make_v4(10, 4, 0, 1);
+    dmip_addr_t dst = make_v4(10, 4, 0, 2);
+    uint8_t payload[5] = { 'h', 'e', 'l', 'l', 'o' };
+
+    feed_udp_packet(g_iface0, src, dst, 12345, 53, payload, sizeof(payload));
+
+    dmip_family_t family = dmip_family_none;
+    dmip_addr_t src_ip = { 0 };
+    uint16_t src_port = 0, dst_port = 0;
+    uint8_t* out_payload = NULL;
+    size_t out_payload_len = 0;
+    dmnetif_iface_t out_iface = NULL;
+
+    DMOD_TEST_EXPECT_EQ(dmudp_receive(0, &family, &src_ip, &src_port, &dst_port, &out_payload, &out_payload_len, &out_iface), 0);
+    DMOD_TEST_EXPECT_EQ(family, dmip_family_v4);
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(src_ip.addr.v4, src.addr.v4, DMIP_IPV4_ADDR_LEN));
+    DMOD_TEST_EXPECT_EQ(src_port, (uint16_t)12345);
+    DMOD_TEST_EXPECT_EQ(dst_port, (uint16_t)53);
+    DMOD_TEST_EXPECT_EQ(out_payload_len, sizeof(payload));
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(out_payload, payload, sizeof(payload)));
+    DMOD_TEST_EXPECT_EQ(out_iface, g_iface0);
+
+    Dmod_Free(out_payload);
 }

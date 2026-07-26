@@ -50,9 +50,9 @@ See [dmip.md](dmip.md) for the rationale behind this module's design.
 | `dmip_v4_next_identification(void)` | Next value from the system-wide IPv4 identification counter |
 | `dmip_v4_fragment(header, payload, payload_len, mtu, callback, user_data)` | Split `payload` into `mtu`-sized IPv4 packets |
 | `dmip_v4_reassemble(fragment, length, out_packet, out_length)` | Feed one received IPv4 packet through reassembly |
-| `dmip_v4_get_source_address(dst, out_src)` | Find the source address `dmip_v4_send()` would use to reach `dst` (route lookup + the egress interface's own IP) |
-| `dmip_v4_send(header, payload, payload_len, arp_timeout_ms)` | Build, fragment (if needed) and transmit a complete IPv4 packet - route lookup, ARP resolution, and `dmnetif_send()` all in one call |
-| `dmip_v4_receive(iface, out_packet, out_length)` | Poll `iface` once for an inbound IPv4 packet, running it through reassembly |
+| `dmip_v4_get_source_address(dst, out_src)` | Find the source address `dmip_v4_send()` would use to reach `dst` - a thin call to `dmnetbridge_get_source_address()` |
+| `dmip_v4_send(header, payload, payload_len, arp_timeout_ms)` | Build, fragment (if needed) and transmit a complete IPv4 packet - each fragment goes through `dmnetbridge_send()` (route lookup, ARP resolution, `dmnetif_send()`) |
+| `dmip_v4_receive(timeout_ms, out_packet, out_length, out_iface)` | Wait up to `timeout_ms` for an inbound IPv4 packet, push-fed by dmip's own `packet_received` DIF implementation (see [dmip.md](dmip.md#send--receive)) |
 
 ### IPv6
 
@@ -64,7 +64,7 @@ See [dmip.md](dmip.md) for the rationale behind this module's design.
 | `dmip_v6_next_identification(void)` | Next value from the system-wide IPv6 fragment identification counter |
 | `dmip_v6_fragment(header, payload, payload_len, mtu, identification, callback, user_data)` | Split `payload` into `mtu`-sized IPv6 packets, adding a Fragment header if needed |
 | `dmip_v6_reassemble(fragment, length, out_packet, out_length)` | Feed one received IPv6 packet through reassembly |
-| `dmip_v6_receive(iface, out_packet, out_length)` | Poll `iface` once for an inbound IPv6 packet, running it through reassembly. No `dmip_v6_send()` yet - see [dmip.md](dmip.md#send--receive) |
+| `dmip_v6_receive(timeout_ms, out_packet, out_length, out_iface)` | Wait up to `timeout_ms` for an inbound IPv6 packet, push-fed the same way as `dmip_v4_receive()`. No `dmip_v6_send()` yet - see [dmip.md](dmip.md#send--receive) |
 
 ### Family-agnostic
 
@@ -72,6 +72,6 @@ See [dmip.md](dmip.md) for the rationale behind this module's design.
 |------------------|--------------|
 | `dmip_header_t` | `{ family; union { dmip_v4_header_t v4; dmip_v6_header_t v6; } header; }` - set `family`, fill in the matching union member |
 | `dmip_send(header, payload, payload_len, arp_timeout_ms)` | Dispatches to `dmip_v4_send()` for `dmip_family_v4`; `-ENOSYS` for `dmip_family_v6` (no `dmip_v6_send()` yet); `-EINVAL` if `header` is `NULL` or `family` is neither |
-| `dmip_receive(iface, out_family, out_packet, out_length)` | One `dmnetif_receive()` call handling either family - see [dmip.md](dmip.md#family-agnostic-dmip_send-dmip_receive) for why this isn't the same as calling `dmip_v4_receive()`/`_v6_receive()` back to back |
+| `dmip_receive(timeout_ms, out_family, out_packet, out_length, out_iface)` | Waits on the same receive queue for either family - see [dmip.md](dmip.md#family-agnostic-dmip_send-dmip_receive) for why this isn't the same as calling `dmip_v4_receive()`/`_v6_receive()` back to back |
 
 See `include/dmip.h` for full parameter/return documentation on every function above.

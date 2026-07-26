@@ -39,6 +39,7 @@ API's shape.
 | `dmnetif_down(iface)`           | Bring the interface down.                                |
 | `dmnetif_is_up(iface)`          | Whether `dmnetif_up()` has been called without a matching `dmnetif_down()`. |
 | `dmnetif_get_link_status(iface)`| Query the current link status from the driver.           |
+| `dmnetif_is_present(iface)`     | Whether the interface's backing devfs file still exists - distinct from `dmnetif_is_up()`'s administrative state. |
 
 ## MTU
 
