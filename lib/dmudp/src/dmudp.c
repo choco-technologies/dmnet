@@ -2,9 +2,17 @@
  * @file dmudp.c
  * @brief DMOD UDP - Implementation
  *
- * Stateless: every function here is a one-shot build+checksum+send or a
- * one-shot poll+parse+verify - no globals, no registry, matching dmip.c's
- * own "Send / Receive" section this is built directly on top of.
+ * Sending is still a one-shot build+checksum+send with no state of its
+ * own. Receiving is no longer poll-based: dmudp registers itself with
+ * dmip as the handler for DMIP_PROTO_UDP (dmip_register_protocol(), in
+ * dmod_init()) and owns a small receive queue of its own
+ * (g_rx_queue/g_rx_mutex/g_rx_signal) - dmudp_handle_ip_packet() is
+ * called by dmip for every completed UDP packet (from whatever thread
+ * happens to be pumping the interface it arrived on), parses out the
+ * datagram and pushes it onto that queue; dmudp_receive() waits on it.
+ * See dmip.h's "Protocol registration" section for why dmip dispatches
+ * by protocol number instead of handing every packet to whoever last
+ * called a generic receive function.
  *
  * Segments are built/parsed as raw byte buffers rather than packed C
  * structs, same reasoning as dmip.c/dmarp.c (dmod's minimal module
@@ -20,6 +28,8 @@
 #define DMOD_ENABLE_REGISTRATION    ON
 #include "dmod.h"
 #include "dmudp.h"
+#include "dmlist.h"
+#include "dmosi.h"
 #include <string.h>
 #include <errno.h>
 
@@ -36,6 +46,35 @@ static uint16_t read_u16_be(const uint8_t* p)
 {
     return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
 }
+
+/**
+ * @brief One received UDP datagram waiting to be picked up by
+ *        dmudp_receive() - see g_rx_queue
+ */
+struct dmudp_rx_entry
+{
+    dmip_family_t   family;
+    dmnetif_iface_t iface;
+    dmip_addr_t     src_ip;
+    uint16_t        src_port;
+    uint16_t        dst_port;
+    uint8_t*        payload;
+    size_t          payload_len;
+};
+
+/**
+ * @brief Queue of dmudp_rx_entry* waiting to be picked up by
+ *        dmudp_receive() - same shape dmip.c's own receive queue used to
+ *        be (dmlist_context_t* + dmosi_mutex_t + dmosi_semaphore_t, not a
+ *        fixed-size dmosi_queue_t), fed by dmudp_handle_ip_packet()
+ */
+static dmlist_context_t* g_rx_queue = NULL;
+static dmosi_mutex_t     g_rx_mutex = NULL;
+
+/**
+ * @brief Posted once per entry pushed onto g_rx_queue
+ */
+static dmosi_semaphore_t g_rx_signal = NULL;
 
 /**
  * @brief Write the 12-byte IPv4 pseudo-header (RFC 768) into `buf`
@@ -180,9 +219,9 @@ dmod_dmudp_api_declaration(1.0, int, _send, ( const dmip_addr_t* dst_ip, uint16_
  *        caller has already verified `segment` is at least
  *        DMUDP_HEADER_LEN bytes and passed checksum verification
  *
- * Shared tail of dmudp_receive()'s two family branches - the only thing
- * that differs between them is how `segment` was obtained (IPv4 vs IPv6
- * packet, checksum-skip-on-zero vs always-verified).
+ * Shared tail of dmudp_handle_ip_packet()'s two family branches - the
+ * only thing that differs between them is how `segment` was obtained
+ * (IPv4 vs IPv6 packet, checksum-skip-on-zero vs always-verified).
  */
 static int extract_udp_datagram(const uint8_t* segment, size_t segment_len, uint16_t* out_src_port, uint16_t* out_dst_port, uint8_t** out_payload, size_t* out_payload_len)
 {
@@ -204,26 +243,60 @@ static int extract_udp_datagram(const uint8_t* segment, size_t segment_len, uint
 }
 
 /**
- * @brief Implementation of dmudp_receive() - see dmudp.h
+ * @brief Push a received datagram onto g_rx_queue and wake any waiter
  *
- * No separate dmudp_v4_receive()/_v6_receive() (same reasoning as
- * dmudp_send() not having a per-family split): built on dmip_receive(),
- * which already waits for either family on its own internal queue rather
- * than two per-family calls that would each risk starving the other (see
- * dmip_receive()'s own doc comment).
+ * Takes ownership of `payload` - frees it itself if the queue entry
+ * couldn't be allocated/pushed, so the caller never has to.
  */
-dmod_dmudp_api_declaration(1.0, int, _receive, ( uint32_t timeout_ms, dmip_family_t* out_family, dmip_addr_t* out_src_ip, uint16_t* out_src_port, uint16_t* out_dst_port, uint8_t** out_payload, size_t* out_payload_len, dmnetif_iface_t* out_iface ))
+static void push_rx_entry(dmip_family_t family, dmnetif_iface_t iface, const dmip_addr_t* src_ip, uint16_t src_port, uint16_t dst_port, uint8_t* payload, size_t payload_len)
 {
-    if (out_family == NULL || out_src_ip == NULL || out_src_port == NULL || out_dst_port == NULL || out_payload == NULL || out_payload_len == NULL)
-        return -EINVAL;
+    struct dmudp_rx_entry* entry = Dmod_Malloc(sizeof(*entry));
+    if (entry == NULL)
+    {
+        Dmod_Free(payload);
+        return;
+    }
 
-    uint8_t* ip_packet = NULL;
-    size_t ip_packet_len = 0;
-    dmip_family_t family = dmip_family_none;
-    int result = dmip_receive(timeout_ms, &family, &ip_packet, &ip_packet_len, out_iface);
-    if (result != 0)
-        return result;
+    entry->family = family;
+    entry->iface = iface;
+    entry->src_ip = *src_ip;
+    entry->src_port = src_port;
+    entry->dst_port = dst_port;
+    entry->payload = payload;
+    entry->payload_len = payload_len;
 
+    dmosi_mutex_lock(g_rx_mutex);
+    bool pushed = dmlist_push_back(g_rx_queue, entry);
+    dmosi_mutex_unlock(g_rx_mutex);
+
+    if (pushed)
+    {
+        dmosi_semaphore_post(g_rx_signal, 1);
+    }
+    else
+    {
+        Dmod_Free(entry->payload);
+        Dmod_Free(entry);
+    }
+}
+
+/**
+ * @brief dmip_protocol_handler_t registered for DMIP_PROTO_UDP - see dmod_init()
+ *
+ * Parses `packet`'s IP header to locate the UDP segment, verifies its
+ * checksum (dmudp_v4_checksum_valid(), skipped if the wire value is 0 per
+ * RFC 768; or dmudp_v6_checksum_valid(), always required per RFC 8200),
+ * and - on success - copies the payload out (extract_udp_datagram()) and
+ * pushes it onto g_rx_queue. `packet` is borrowed (see
+ * dmip_protocol_handler_t's own doc comment in dmip.h) - everything this
+ * function wants to keep past the call is copied out before returning.
+ * Anything that fails to parse or verify is silently dropped - there is
+ * no caller here to report an error to, same as dmip's own
+ * packet_received DIF implementation.
+ */
+static void dmudp_handle_ip_packet(dmip_family_t family, dmnetif_iface_t iface, const uint8_t* packet, size_t packet_len)
+{
+    dmip_addr_t src_ip = { 0 };
     const uint8_t* segment = NULL;
     size_t segment_len = 0;
 
@@ -231,76 +304,149 @@ dmod_dmudp_api_declaration(1.0, int, _receive, ( uint32_t timeout_ms, dmip_famil
     {
         dmip_v4_header_t ip_header = { 0 };
         size_t header_len = 0;
-        result = dmip_v4_parse_header(ip_packet, ip_packet_len, &ip_header, &header_len);
-        if (result != 0 || ip_header.protocol != DMIP_PROTO_UDP)
-        {
-            Dmod_Free(ip_packet);
-            return (result != 0) ? result : -EPROTO;
-        }
+        if (dmip_v4_parse_header(packet, packet_len, &ip_header, &header_len) != 0)
+            return;
 
-        segment = ip_packet + header_len;
-        segment_len = ip_packet_len - header_len;
+        segment = packet + header_len;
+        segment_len = packet_len - header_len;
         if (segment_len < DMUDP_HEADER_LEN)
-        {
-            Dmod_Free(ip_packet);
-            return -EPROTO;
-        }
+            return;
 
         uint16_t wire_checksum = read_u16_be(&segment[6]);
         if (wire_checksum != 0 && !dmudp_v4_checksum_valid(&ip_header.src, &ip_header.dst, segment, segment_len))
-        {
-            Dmod_Free(ip_packet);
-            return -EBADMSG;
-        }
+            return;
 
-        *out_src_ip = ip_header.src;
+        src_ip = ip_header.src;
     }
     else /* dmip_family_v6 */
     {
         dmip_v6_header_t ip_header = { 0 };
-        result = dmip_v6_parse_header(ip_packet, ip_packet_len, &ip_header);
-        if (result != 0 || ip_header.next_header != DMIP_PROTO_UDP)
-        {
-            Dmod_Free(ip_packet);
-            return (result != 0) ? result : -EPROTO;
-        }
+        if (dmip_v6_parse_header(packet, packet_len, &ip_header) != 0)
+            return;
 
-        segment = ip_packet + DMIP_V6_HEADER_LEN;
-        segment_len = ip_packet_len - DMIP_V6_HEADER_LEN;
+        segment = packet + DMIP_V6_HEADER_LEN;
+        segment_len = packet_len - DMIP_V6_HEADER_LEN;
         if (segment_len < DMUDP_HEADER_LEN)
-        {
-            Dmod_Free(ip_packet);
-            return -EPROTO;
-        }
+            return;
 
         if (!dmudp_v6_checksum_valid(&ip_header.src, &ip_header.dst, segment, segment_len))
+            return;
+
+        src_ip = ip_header.src;
+    }
+
+    uint16_t src_port = 0;
+    uint16_t dst_port = 0;
+    uint8_t* payload = NULL;
+    size_t payload_len = 0;
+    if (extract_udp_datagram(segment, segment_len, &src_port, &dst_port, &payload, &payload_len) != 0)
+        return;
+
+    push_rx_entry(family, iface, &src_ip, src_port, dst_port, payload, payload_len);
+}
+
+/**
+ * @brief Implementation of dmudp_receive() - see dmudp.h
+ *
+ * No separate dmudp_v4_receive()/_v6_receive() (same reasoning as
+ * dmudp_send() not having a per-family split): waits on g_rx_signal up to
+ * `timeout_ms`, popping the first entry dmudp_handle_ip_packet() queued -
+ * whichever family it happens to be.
+ */
+dmod_dmudp_api_declaration(1.0, int, _receive, ( uint32_t timeout_ms, dmip_family_t* out_family, dmip_addr_t* out_src_ip, uint16_t* out_src_port, uint16_t* out_dst_port, uint8_t** out_payload, size_t* out_payload_len, dmnetif_iface_t* out_iface ))
+{
+    if (out_family == NULL || out_src_ip == NULL || out_src_port == NULL || out_dst_port == NULL || out_payload == NULL || out_payload_len == NULL)
+        return -EINVAL;
+
+    uint32_t deadline = dmosi_get_tick_count() + timeout_ms;
+
+    for (;;)
+    {
+        dmosi_mutex_lock(g_rx_mutex);
+        struct dmudp_rx_entry* entry = (struct dmudp_rx_entry*)dmlist_pop_front(g_rx_queue);
+        dmosi_mutex_unlock(g_rx_mutex);
+
+        if (entry != NULL)
         {
-            Dmod_Free(ip_packet);
-            return -EBADMSG;
+            *out_family = entry->family;
+            *out_src_ip = entry->src_ip;
+            *out_src_port = entry->src_port;
+            *out_dst_port = entry->dst_port;
+            *out_payload = entry->payload;
+            *out_payload_len = entry->payload_len;
+            if (out_iface != NULL)
+            {
+                *out_iface = entry->iface;
+            }
+            Dmod_Free(entry);
+            return 0;
         }
 
-        *out_src_ip = ip_header.src;
+        int32_t remaining = (int32_t)(deadline - dmosi_get_tick_count());
+        if (remaining <= 0)
+            break;
+
+        dmosi_semaphore_wait(g_rx_signal, 1, remaining);
     }
 
-    result = extract_udp_datagram(segment, segment_len, out_src_port, out_dst_port, out_payload, out_payload_len);
-    if (result == 0)
-    {
-        *out_family = family;
-    }
-
-    Dmod_Free(ip_packet);
-    return result;
+    return -EAGAIN;
 }
 
 /* ---- DMOD lifecycle ---- */
 
+/**
+ * @brief Module initialization - allocates the receive queue and its
+ *        guarding mutex/semaphore, then registers as the DMIP_PROTO_UDP
+ *        handler
+ */
 int dmod_init(const Dmod_Config_t *Config)
 {
     (void)Config;
+
+    g_rx_queue = dmlist_create(Dmod_GetCurrentAllocatorName());
+    g_rx_mutex = dmosi_mutex_create(false);
+    g_rx_signal = dmosi_semaphore_create(0, UINT32_MAX);
+    if (g_rx_queue == NULL || g_rx_mutex == NULL || g_rx_signal == NULL)
+    {
+        DMOD_LOG_ERROR("Failed to allocate dmudp state\n");
+        return -1;
+    }
+
+    int result = dmip_register_protocol(DMIP_PROTO_UDP, dmudp_handle_ip_packet);
+    if (result != 0)
+    {
+        DMOD_LOG_ERROR("dmudp: cannot register as the UDP protocol handler (%d)\n", result);
+        return -1;
+    }
+
+    DMOD_LOG_INFO("DMUDP initialized\n");
     return 0;
 }
 
+/**
+ * @brief Module deinitialization - unregisters from dmip, frees every
+ *        queued-but-unclaimed datagram, then the queue and its mutex/
+ *        semaphore
+ */
 int dmod_deinit(void)
 {
+    dmip_unregister_protocol(DMIP_PROTO_UDP);
+
+    size_t count = dmlist_size(g_rx_queue);
+    for (size_t i = 0; i < count; i++)
+    {
+        struct dmudp_rx_entry* entry = (struct dmudp_rx_entry*)dmlist_pop_front(g_rx_queue);
+        Dmod_Free(entry->payload);
+        Dmod_Free(entry);
+    }
+    dmlist_destroy(g_rx_queue);
+    g_rx_queue = NULL;
+
+    dmosi_mutex_destroy(g_rx_mutex);
+    g_rx_mutex = NULL;
+    dmosi_semaphore_destroy(g_rx_signal);
+    g_rx_signal = NULL;
+
+    DMOD_LOG_INFO("DMUDP deinitialized\n");
     return 0;
 }

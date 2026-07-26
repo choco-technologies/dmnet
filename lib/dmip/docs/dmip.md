@@ -105,24 +105,21 @@ interfaces/routing/ARP (see `send_v4_fragment()` in `src/dmip.c`).
 `dmip_v4_get_source_address()` itself is now a thin call to
 `dmnetbridge_get_source_address()`.
 
-Receiving is push-based, not polled: dmip implements dmnetbridge's
-`packet_received` DIF (`dmip_dmnetbridge_packet_received()` in
-`src/dmip.c`, following the naming dmod's DIF macros generate) - called by
-whichever thread is pumping *any* interface
-(`dmnetbridge_handle_netif_rx()`, run by the `networkd` service), for
-every frame it reads. The implementation checks the Ethertype, strips the
-14-byte L2 header, and feeds the rest through `dmip_v4_reassemble()`/
-`_v6_reassemble()` exactly as before - a completed packet is pushed onto
-an internal queue (`g_rx_queue`, guarded by a mutex and a semaphore,
-`g_rx_signal` - same shape as `dmdevfs.c`'s own hotplug-event queue, not a
-fixed-size ring) instead of being returned directly, since the caller of
-`dmip_v4_receive()`/`_v6_receive()`/`_receive()` is essentially never the
-same thread that received the frame. Those three functions wait on that
-queue up to a caller-supplied `timeout_ms`, scanning for an entry matching
-the family they want (v4-only / v6-only / either) - see "Receive queue" in
-`src/dmip.c` for the full picture. None of them take an interface
-parameter anymore; each has an optional `out_iface` instead, filled in
-with whichever interface the returned packet actually arrived on.
+Receiving is push-based, not polled, and dispatched by protocol number -
+there is no generic "give me the next packet" pull API anymore
+(`dmip_v4_receive()`/`_v6_receive()`/`_receive()` were removed). dmip
+implements dmnetbridge's `packet_received` DIF
+(`dmip_dmnetbridge_packet_received()` in `src/dmip.c`, following the
+naming dmod's DIF macros generate) - called by whichever thread is
+pumping *any* interface (`dmnetbridge_handle_netif_rx()`, run by the
+`networkd` service), for every frame it reads. The implementation checks
+the Ethertype, strips the 14-byte L2 header, and feeds the rest through
+`dmip_v4_reassemble()`/`_v6_reassemble()` exactly as before; a completed
+packet's header is then parsed once more purely to read its protocol
+number (IPv4's `protocol` field / IPv6's `next_header`), and
+`dispatch_packet()` hands it to whichever module registered for that
+number, a registered default handler, or drops it if neither exists - see
+"Protocol dispatch" below.
 
 There is no `dmip_v6_send()`: resolving a destination MAC for IPv6 uses
 NDP (RFC 4861), not ARP, and there is no NDP module in this tree yet -
@@ -130,7 +127,7 @@ the same boundary `dmarp.h` documents for itself regarding IPv6. Once an
 NDP module exists, `dmip_v6_send()` can be added following the exact shape
 of `dmip_v4_send()` (via `dmnetbridge_send()`, same as IPv4).
 
-## Family-agnostic `dmip_send()`/`dmip_receive()`
+## Family-agnostic `dmip_send()`
 
 A caller already has to say which family it means once - by populating
 either `dmip_v4_header_t` or `dmip_v6_header_t` (they don't share a field
@@ -140,15 +137,42 @@ that is redundant. `dmip_send()` takes a `dmip_header_t` (the same two
 header structs behind a `family` tag, needed because the structs don't
 share a common initial sequence so the tag can't be inferred safely) and
 dispatches to `dmip_v4_send()` itself, or `-ENOSYS` for `dmip_family_v6`
-until `dmip_v6_send()` exists.
+until `dmip_v6_send()` exists. There is no equivalent `dmip_receive()`
+anymore - see "Protocol dispatch" below for why.
 
-`dmip_receive()` is not just a convenience on the receive side - it fixes
-a real gap: `dmip_v4_receive()` and `dmip_v6_receive()` each only ever
-match their own family's queue entries, so polling both in a loop would
-starve whichever one is called second behind the first if packets of both
-families keep arriving. `dmip_receive()` waits on the same queue for
-*either* family and returns whichever was queued first, reporting which
-family it got via an output parameter.
+## Protocol dispatch
+
+Before this, every completed packet (any protocol) was pushed onto one
+shared queue, and `dmip_v4_receive()`/`_v6_receive()`/`_receive()` popped
+from it filtering only by *family* - never by protocol. That was a real
+bug waiting to happen: with two protocol consumers (say `dmudp` and a
+future `dmtcp`), whichever one's receive call happened to be waiting when
+a packet arrived could get a packet meant for the *other* protocol, which
+it would then discard (`dmudp_receive()` used to do exactly this - parse
+the packet, see `protocol != DMIP_PROTO_UDP`, free it and return
+`-EPROTO`). That's silent, permanent data loss for whoever actually
+wanted it, and it only gets worse as more protocols are added.
+
+The fix: `dmip_register_protocol(protocol, handler)` registers `handler`
+as the *only* recipient of packets whose header names that protocol
+number (`DMIP_PROTO_UDP`, `_TCP`, `_ICMP`, ... - the same numbering IPv4's
+`protocol` field and IPv6's `next_header` already share). A single
+`dmip_register_default_protocol(handler)` covers whatever protocol number
+nobody else claimed. `dmudp` is the first (only, today) real consumer -
+see [dmudp.md](../../dmudp/docs/dmudp.md) - registering itself for
+`DMIP_PROTO_UDP` in its own `dmod_init()` and owning its own receive queue
+downstream of that registration, the same shape dmip's queue used to be.
+This mirrors how real IP stacks dispatch by protocol number (Linux's
+`inet_add_protocol()` table, BSD's `protosw`) - dmip was already a
+dispatcher one level up (by Ethertype, via the `packet_received` DIF); this
+is the same idea one level further in.
+
+A registered handler receives a **borrowed** `packet` pointer, valid only
+for the duration of the call (same contract `dmnetbridge.h`'s
+`packet_received` DIF already documents for its own `frame` parameter) -
+`dispatch_packet()` in `src/dmip.c` frees it right after the handler (or
+default handler, or neither) returns, so a handler that wants to keep
+data past the call must copy it out itself.
 
 ## Byte buffers, not packed structs
 
@@ -163,12 +187,13 @@ would corrupt every packet silently.
 - `dmroute` - header-only: the address type (re-exported as `dmip_addr_t`).
   dmip.c itself never calls a `dmroute_*` function anymore - that moved to
   dmnetbridge
-- `dmnetif` - header-only: `dmnetif_iface_t` for the optional `out_iface`
-  parameter on the receive functions. dmip.c never calls a `dmnetif_*`
-  function directly anymore either
+- `dmnetif` - header-only: `dmnetif_iface_t`, passed through to a
+  registered protocol handler. dmip.c never calls a `dmnetif_*` function
+  directly anymore either
 - `dmnetbridge` - `dmnetbridge_send()`/`_get_source_address()`/`_get_mtu()`
   for `dmip_v4_send()`, and the `packet_received` DIF dmip implements for
   receiving
-- `dmlist` - fragment reassembly bookkeeping, and the receive queue
-- `dmosi` - mutexes/semaphore guarding reassembly/identification/receive-
-  queue state, plus `dmosi_get_tick_count()` for reassembly timeouts
+- `dmlist` - fragment reassembly bookkeeping, and the protocol dispatch
+  table
+- `dmosi` - mutexes guarding reassembly/identification/protocol-dispatch
+  state, plus `dmosi_get_tick_count()` for reassembly timeouts

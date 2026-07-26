@@ -28,20 +28,25 @@ extern "C" {
  *
  * dmip depends on dmroute (only for the address type - dmip_addr_t is a
  * re-export, see below) and dmnetif (only for the dmnetif_iface_t type
- * used in the optional out_iface parameter below - dmip never calls a
- * dmnetif function directly). Routing, ARP resolution, and actual frame
- * I/O all live in dmnetbridge now: dmip_v4_send() calls
- * dmnetbridge_send()/_get_source_address()/_get_mtu() once it has a
- * payload ready, and dmip_v4_receive()/_v6_receive()/_receive() are fed by
- * dmnetbridge - see "Receive queue" in dmip.c and dmnetbridge.h's own doc
- * comment for the full picture. Also depends on dmlist (fragment
- * reassembly bookkeeping, and the receive queue) and dmosi (mutexes, a
- * semaphore, and tick count for timeouts). There is exactly one
- * reassembly table, one receive queue, and one pair of identification
- * counters per system, so every function here is plain Built-in API
- * (dmod_dmip_api) - dmip additionally implements dmnetbridge's
- * packet_received DIF (see dmip.c), which is the one part of this module
- * that isn't.
+ * passed to a registered protocol handler - see "Protocol registration"
+ * below - dmip never calls a dmnetif function directly). Routing, ARP
+ * resolution, and actual frame I/O all live in dmnetbridge now:
+ * dmip_v4_send() calls dmnetbridge_send()/_get_source_address()/_get_mtu()
+ * once it has a payload ready. Receiving has no public pull API anymore
+ * (dmip_v4_receive()/_v6_receive()/_receive() were removed) - instead,
+ * dmip implements dmnetbridge's packet_received DIF (fed by whichever
+ * thread is pumping an interface - see dmnetbridge.h) and dispatches
+ * each completed packet to whichever module registered for its IP
+ * protocol number via dmip_register_protocol(), or a registered default
+ * handler, or drops it if nobody claimed it - see "Protocol
+ * registration" below and dmip.c's "Protocol dispatch" section. Also
+ * depends on dmlist (fragment reassembly bookkeeping, and the protocol
+ * registration table) and dmosi (mutexes and tick count for timeouts).
+ * There is exactly one reassembly table, one protocol dispatch table,
+ * and one pair of identification counters per system, so every function
+ * here is plain Built-in API (dmod_dmip_api) - dmip additionally
+ * implements dmnetbridge's packet_received DIF (see dmip.c), which is
+ * the one part of this module that isn't.
  */
 
 /* ============================================================================
@@ -85,6 +90,83 @@ typedef dmroute_addr_t dmip_addr_t;
 #define DMIP_PROTO_UDP            17u
 #define DMIP_PROTO_IPV6_FRAGMENT  44u
 #define DMIP_PROTO_ICMPV6         58u
+
+/* ============================================================================
+ *                      Protocol registration
+ * ========================================================================== */
+
+/**
+ * @brief Callback registered via dmip_register_protocol()/
+ *        _register_default_protocol() to receive completed IP packets
+ *
+ * Called by dmip's own implementation of dmnetbridge's packet_received
+ * DIF (see dmnetbridge.h and dmip.c's "Protocol dispatch" section) from
+ * whatever thread is pumping the interface the packet arrived on -
+ * usually not the same thread that will eventually want the data, so a
+ * handler that needs to keep it past this call (e.g. to hand it to a
+ * waiting dmudp_receive()-style caller) must copy it out itself.
+ *
+ * @param family     dmip_family_v4 or _v6
+ * @param iface      Interface the packet arrived on
+ * @param packet     Complete reassembled wire-format IP packet (header +
+ *                    payload). Only valid for the duration of the call -
+ *                    dmip frees it once every registered/default handler
+ *                    (whichever one matched) has returned
+ * @param packet_len Length of `packet` in bytes
+ */
+typedef void (*dmip_protocol_handler_t)( dmip_family_t family, dmnetif_iface_t iface, const uint8_t* packet, size_t packet_len );
+
+/**
+ * @brief Register `handler` as the receiver for IP protocol number `protocol`
+ *
+ * Every completed packet (either family - `protocol` is IPv4's `protocol`
+ * field and IPv6's `next_header`, the same numbering space, see
+ * DMIP_PROTO_* above) whose header names this `protocol` is delivered to
+ * `handler` and nobody else - see dmip.c's "Protocol dispatch" section
+ * for why this replaced dmip handing every packet to whoever last called
+ * a generic receive function (dmip_v4_receive()/_v6_receive()/_receive()
+ * do not exist anymore - see docs/dmip.md).
+ *
+ * @param protocol IP protocol/next-header number to claim (e.g.
+ *                  DMIP_PROTO_UDP)
+ * @param handler  Callback to invoke for every packet matching `protocol`
+ *
+ * @return 0 on success, -EINVAL if `handler` is NULL, -EEXIST if
+ *         `protocol` is already registered (call
+ *         dmip_unregister_protocol() first if you mean to replace it),
+ *         -ENOMEM if the registration itself could not be allocated
+ */
+dmod_dmip_api(1.0, int, _register_protocol, ( uint8_t protocol, dmip_protocol_handler_t handler ));
+
+/**
+ * @brief Undo dmip_register_protocol() - safe to call for a protocol that
+ *        was never registered (a no-op)
+ *
+ * @param protocol IP protocol/next-header number to release
+ */
+dmod_dmip_api(1.0, void, _unregister_protocol, ( uint8_t protocol ));
+
+/**
+ * @brief Register `handler` as the fallback for any packet whose protocol
+ *        has no dmip_register_protocol() registrant
+ *
+ * There is only ever one default handler, not a list - registering a
+ * second one before unregistering the first fails rather than silently
+ * replacing it.
+ *
+ * @param handler Callback to invoke for every packet with no more
+ *                 specific registrant
+ *
+ * @return 0 on success, -EINVAL if `handler` is NULL, -EEXIST if a
+ *         default handler is already registered
+ */
+dmod_dmip_api(1.0, int, _register_default_protocol, ( dmip_protocol_handler_t handler ));
+
+/**
+ * @brief Undo dmip_register_default_protocol() - safe to call when no
+ *        default handler is registered (a no-op)
+ */
+dmod_dmip_api(1.0, void, _unregister_default_protocol, ( void ));
 
 /* ============================================================================
  *                      Common constants
@@ -399,32 +481,6 @@ dmod_dmip_api(1.0, int, _v4_get_source_address, ( const dmip_addr_t* dst, dmip_a
  */
 dmod_dmip_api(1.0, int, _v4_send, ( const dmip_v4_header_t* header, const void* payload, size_t payload_len, uint32_t arp_timeout_ms ));
 
-/**
- * @brief Receive one IPv4 packet, if one is available
- *
- * Push-based: dmip implements dmnetbridge's packet_received DIF (see
- * dmnetbridge.h), fed by whichever thread is pumping any interface
- * (dmnetbridge_handle_netif_rx(), run by the networkd service) - a
- * completed IPv4 packet from *any* interface is queued the moment it
- * arrives. This call waits on that queue up to `timeout_ms`, returning
- * whichever IPv4 packet was queued first. See dmip.c's "Receive queue"
- * section for the full picture.
- *
- * @param timeout_ms Milliseconds to wait for a packet if none is already
- *                    queued. 0 checks the queue once and returns
- *                    immediately without waiting
- * @param out_packet Output: on 0, a heap-allocated complete wire-format
- *                    IPv4 packet - see dmip_v4_reassemble(). Owned by the
- *                    caller - release with Dmod_Free() when done
- * @param out_length Output: length of `*out_packet` in bytes
- * @param out_iface  Output: the interface the packet arrived on. Optional
- *                    - pass NULL if not needed
- *
- * @return 0 if a packet was returned, -EAGAIN if none arrived within
- *         `timeout_ms`, -EINVAL if `out_packet`/`out_length` is NULL
- */
-dmod_dmip_api(1.0, int, _v4_receive, ( uint32_t timeout_ms, uint8_t** out_packet, size_t* out_length, dmnetif_iface_t* out_iface ));
-
 /* ============================================================================
  *                      IPv6
  * ========================================================================== */
@@ -573,34 +629,12 @@ dmod_dmip_api(1.0, int, _v6_fragment, ( const dmip_v6_header_t* header, const vo
  */
 dmod_dmip_api(1.0, int, _v6_reassemble, ( const uint8_t* fragment, size_t length, uint8_t** out_packet, size_t* out_length ));
 
-/**
- * @brief Receive one IPv6 packet, if one is available
- *
- * IPv6's equivalent of dmip_v4_receive(): push-based, fed by dmip's own
- * implementation of dmnetbridge's packet_received DIF - see that
- * function's doc comment for the full picture.
- *
- * There is no dmip_v6_send(): building the Ethernet frame requires a
+/* There is no dmip_v6_send(): building the Ethernet frame requires a
  * destination MAC, which for IPv4 comes from dmarp (ARP) - IPv6 resolves
  * that via NDP (RFC 4861) instead, and there is no NDP module in this
  * tree yet (the same boundary dmarp.h documents for itself). Once one
  * exists, dmip_v6_send() can be added following the exact shape of
- * dmip_v4_send() (via dmnetbridge_send(), same as IPv4).
- *
- * @param timeout_ms Milliseconds to wait for a packet if none is already
- *                    queued. 0 checks the queue once and returns
- *                    immediately without waiting
- * @param out_packet Output: on 0, a heap-allocated complete wire-format
- *                    IPv6 packet - see dmip_v6_reassemble(). Owned by the
- *                    caller - release with Dmod_Free() when done
- * @param out_length Output: length of `*out_packet` in bytes
- * @param out_iface  Output: the interface the packet arrived on. Optional
- *                    - pass NULL if not needed
- *
- * @return 0 if a packet was returned, -EAGAIN if none arrived within
- *         `timeout_ms`, -EINVAL if `out_packet`/`out_length` is NULL
- */
-dmod_dmip_api(1.0, int, _v6_receive, ( uint32_t timeout_ms, uint8_t** out_packet, size_t* out_length, dmnetif_iface_t* out_iface ));
+ * dmip_v4_send() (via dmnetbridge_send(), same as IPv4). */
 
 /* ============================================================================
  *                      Family-agnostic entry points
@@ -648,40 +682,11 @@ typedef struct
  *                        which has no ARP step
  *
  * @return dmip_v4_send()'s own return value for `dmip_family_v4`;
- *         `-ENOSYS` for `dmip_family_v6` (no dmip_v6_send() yet - see
- *         dmip_v6_receive()'s doc comment for why); `-EINVAL` if `header`
- *         is NULL or `header->family` is neither
+ *         `-ENOSYS` for `dmip_family_v6` (no dmip_v6_send() yet - see the
+ *         comment above dmip_v6_reassemble()'s declaration for why);
+ *         `-EINVAL` if `header` is NULL or `header->family` is neither
  */
 dmod_dmip_api(1.0, int, _send, ( const dmip_header_t* header, const void* payload, size_t payload_len, uint32_t arp_timeout_ms ));
-
-/**
- * @brief Receive one IP packet of either family, if one is available
- *
- * Not the same as calling dmip_v4_receive() and dmip_v6_receive() back to
- * back: each of those only ever matches its own family's queue entries,
- * so polling both in a loop would starve whichever one you call second
- * behind the first if packets of both families keep arriving. This waits
- * on the same queue for *either* family and returns whichever was queued
- * first, regardless of which one it is.
- *
- * @param timeout_ms Milliseconds to wait for a packet if none is already
- *                    queued. 0 checks the queue once and returns
- *                    immediately without waiting
- * @param out_family Output: dmip_family_v4 or _v6, whichever the returned
- *                    packet is - only meaningful when this returns 0
- * @param out_packet Output: on 0, a heap-allocated complete wire-format
- *                    packet of the family in `*out_family` - see
- *                    dmip_v4_receive()/_v6_receive(). Owned by the
- *                    caller - release with Dmod_Free() when done
- * @param out_length Output: length of `*out_packet` in bytes
- * @param out_iface  Output: the interface the packet arrived on. Optional
- *                    - pass NULL if not needed
- *
- * @return 0 if a packet was returned, -EAGAIN if none arrived within
- *         `timeout_ms`, -EINVAL if `out_family`/`out_packet`/`out_length`
- *         is NULL
- */
-dmod_dmip_api(1.0, int, _receive, ( uint32_t timeout_ms, dmip_family_t* out_family, uint8_t** out_packet, size_t* out_length, dmnetif_iface_t* out_iface ));
 
 #ifdef __cplusplus
 }

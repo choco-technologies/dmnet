@@ -31,13 +31,15 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# dmip:    dmip_v4_send()/_receive()/_v6_receive() do the actual work -
-#          dmudp only builds/parses/checksums the UDP segment and hands it
-#          to dmip, plus dmip_checksum() for the pseudo-header checksum and
-#          dmip_v4_get_source_address()/_v4_next_identification()
+# dmip:    dmip_send() does the actual work - dmudp only builds/parses/
+#          checksums the UDP segment and hands it to dmip, plus
+#          dmip_checksum() for the pseudo-header checksum,
+#          dmip_v4_get_source_address()/_v4_next_identification(), and
+#          dmip_register_protocol()/_unregister_protocol() to receive
+#          completed IP packets (see src/dmudp.c)
 # dmroute: dmip_addr_t's real definition (dmroute_addr_t) - dmip_if alone
 #          doesn't carry its include dir
-# dmnetif: dmnetif_iface_t, the interface dmudp_receive() polls
+# dmnetif: dmnetif_iface_t, dmudp_receive()'s optional out_iface parameter
 # All three are in-tree siblings (lib/dmip, lib/dmroute, lib/dmnetif -
 # added earlier via the top-level add_subdirectory(lib) - see
 # dmnet/CMakeLists.txt), not separately published modules, so they're
@@ -46,5 +48,13 @@ target_include_directories(${DMOD_MODULE_NAME}_if INTERFACE
 # of them has such a release) - same convention tools/ifconfig/CMakeLists.txt
 # uses for dmnetif.
 target_link_libraries(${DMOD_MODULE_NAME} dmip_if dmroute_if dmnetif_if)
+
+# dmlist: backs dmudp's own receive queue (see src/dmudp.c)
+# dmosi:  mutex guarding that queue, plus a semaphore dmudp_receive() waits
+#         on and dmudp_handle_ip_packet() posts
+dmod_link_modules(${DMOD_MODULE_NAME}
+    dmlist
+    dmosi
+)
 
 add_subdirectory(tests)

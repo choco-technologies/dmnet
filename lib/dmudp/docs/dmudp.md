@@ -3,25 +3,31 @@
 ## Overview
 
 DMUDP builds and parses UDP segments (RFC 768) - source/destination port,
-length, and a pseudo-header checksum - and sends/receives them. It does
-this by calling straight into [dmip](../../dmip)'s own family-agnostic
-`dmip_send()`/`dmip_receive()`: dmudp itself never talks to dmroute,
-dmarp, or dmnetif directly for anything - dmip already does all of that
-(route lookup, ARP resolution, frame I/O, fragmentation). Building UDP as
-a thin layer over an IP layer that can already put a packet on the wire is
-the entire reason dmudp exists as its own module rather than a few more
-functions bolted onto dmip.
+length, and a pseudo-header checksum - and sends/receives them. Sending
+calls straight into [dmip](../../dmip)'s family-agnostic `dmip_send()`;
+receiving registers itself with dmip as the handler for UDP's IP protocol
+number (`dmip_register_protocol()`) rather than pulling packets from dmip
+directly - dmip no longer hands packets to whoever asks, it dispatches by
+protocol number (see [dmip.md](../../dmip/docs/dmip.md#protocol-dispatch)).
+Either way, dmudp itself never talks to dmroute, dmarp, or dmnetif
+directly for anything - dmip (and, below it, dmnetbridge) already does
+all of that (route lookup, ARP resolution, frame I/O, fragmentation).
+Building UDP as a thin layer over an IP layer that can already put a
+packet on the wire is the entire reason dmudp exists as its own module
+rather than a few more functions bolted onto dmip.
 
 ```
 ┌──────────────────────────────────────────────┐
 │                  DMUDP                        │
 │   build/parse/checksum a UDP segment,         │
-│   dmudp_send()/dmudp_receive()                │
+│   own receive queue fed by a registered       │
+│   protocol handler, dmudp_send()/_receive()   │
 ├──────────────────────────────────────────────┤
 │                  DMIP                         │
-│   dmip_send()/dmip_receive(), dmip_checksum() │
+│   dmip_send(), dmip_checksum(),               │
+│   protocol registration                       │
 ├──────────────────────────────────────────────┤
-│         DMROUTE / DMNETIF / DMARP             │
+│      DMNETBRIDGE / DMROUTE / DMNETIF / DMARP  │
 └──────────────────────────────────────────────┘
 ```
 
@@ -33,10 +39,10 @@ datagram only ever has one destination address, and that address already
 carries the family that would otherwise decide which of two
 same-shaped functions to call - making the caller repeat that choice via
 the function name too is pure redundancy, not a real API surface. This is
-the same reasoning [dmip.md](../../dmip/docs/dmip.md#family-agnostic-dmip_send-dmip_receive)
-gives for `dmip_send()`/`dmip_receive()` one layer down - dmudp just
-carries it one step further and drops the per-family functions
-altogether rather than keeping them *and* a wrapper on top.
+the same reasoning [dmip.md](../../dmip/docs/dmip.md#family-agnostic-dmip_send)
+gives for `dmip_send()` one layer down - dmudp just carries it one step
+further and drops the per-family functions altogether rather than
+keeping them *and* a wrapper on top.
 
 Receiving is, if anything, an even clearer case: which family a datagram
 turns out to be *is* the thing waiting is trying to discover, so it was
@@ -98,17 +104,26 @@ Once `dmip_send()` gains an IPv6 path, `dmudp_send()`'s `dmip_family_v6`
 case follows the exact shape of its existing IPv4 one - no new public
 function needed.
 
-## No socket layer
+## No socket layer, but not stateless anymore
 
-dmudp is stateless - there is no `dmudp_socket_create()`/`bind()`/`close()`,
-no per-port registry, no receive queue of its own (it waits on dmip's
-internal one, but has no state of its own to guard). Every call is a
-one-shot send or a one-shot wait-and-parse, the same shape
-`dmip_send()`/`_receive()` already have. A caller that wants a socket-like
-abstraction (bind to a port, dispatch received datagrams by destination
-port) can build it on top of `dmudp_receive()`'s `out_dst_port` - the same
-way dmudp itself is built on top of dmip rather than dmip growing
-transport-layer state.
+dmudp has no socket/bind concept - there is no `dmudp_socket_create()`/
+`bind()`/`close()`, no per-port registry, and `dmudp_receive()` hands back
+every datagram regardless of destination port (a caller that wants a
+socket-like abstraction - bind to a port, dispatch by destination port -
+can build it on top of `out_dst_port` itself).
+
+It does now own a small receive queue, though - a change from how this
+module used to work (every call a one-shot send or a one-shot
+wait-and-parse, no globals). That's a direct consequence of dmip no
+longer keeping a general-purpose receive queue of its own (see
+[dmip.md](../../dmip/docs/dmip.md#protocol-dispatch)): once dmip
+dispatches by protocol instead of queuing for whoever asks next, whatever
+wants a pull/wait-style `_receive()` call has to hold onto arrived data
+itself between "dmip handed it a packet" and "a caller actually asked for
+it". `dmudp_handle_ip_packet()` (registered via `dmip_register_protocol(DMIP_PROTO_UDP, ...)`
+in `dmod_init()`) is the same parsing/checksum logic this module always
+had, just triggered by that registration instead of by pulling from dmip -
+see `src/dmudp.c`.
 
 ## Byte buffers, not packed structs
 
@@ -118,10 +133,16 @@ module runtime gives no struct-packing guarantee.
 
 ## Dependencies
 
-- `dmip` - `dmip_send()`/`_receive()` do the actual work, plus
-  `dmip_checksum()` for the pseudo-header checksum and
-  `dmip_v4_get_source_address()`/`_v4_next_identification()`
+- `dmip` - `dmip_send()` for transmit, `dmip_register_protocol()`/
+  `_unregister_protocol()` to receive, plus `dmip_checksum()` for the
+  pseudo-header checksum and `dmip_v4_get_source_address()`/
+  `_v4_next_identification()`
 - `dmroute` - `dmip_addr_t`'s real definition (`dmroute_addr_t`)
-- `dmnetif` - header-only: `dmnetif_iface_t` for `dmudp_receive()`'s
-  optional `out_iface` parameter. dmudp.c never calls a `dmnetif_*`
-  function directly - `dmip_receive()` already does all frame I/O
+- `dmnetif` - header-only: `dmnetif_iface_t`, passed through to
+  `dmudp_handle_ip_packet()` and out through `dmudp_receive()`'s optional
+  `out_iface` parameter. dmudp.c never calls a `dmnetif_*` function
+  directly - `dmnetbridge` (via dmip) already does all frame I/O
+- `dmlist` - backs dmudp's own receive queue (see "No socket layer, but
+  not stateless anymore" above)
+- `dmosi` - mutex guarding that queue, plus a semaphore `dmudp_receive()`
+  waits on and `dmudp_handle_ip_packet()` posts

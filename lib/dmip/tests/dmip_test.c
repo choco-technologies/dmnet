@@ -820,22 +820,28 @@ DMOD_TEST_STEP(v4_send_full_path_without_real_driver_returns_eio)
     dmroute_remove(route);
 }
 
-/* ---- IPv4 / IPv6: receive ----
+/* ---- Receive plumbing shared by protocol-dispatch tests below ----
  *
- * Receiving is push-based now (see dmip.c's "Receive queue" section) -
- * dmip_v4_receive()/_v6_receive()/_receive() wait on an internal queue fed
- * by dmip's own implementation of dmnetbridge's packet_received DIF
- * (dmip_dmnetbridge_packet_received()), not by polling an interface
- * directly. feed_packet() below calls that DIF implementation's exact
- * counterpart - a hand-built Ethernet frame - the same way
- * dmnetbridge_handle_netif_rx() would after actually reading one off a
- * real interface, without needing a real driver or a background pump
- * thread to exercise the queue/signal/timeout plumbing.
+ * Receiving is push-based (see dmip.c's "Protocol dispatch" section) -
+ * dmip implements dmnetbridge's packet_received DIF
+ * (dmip_dmnetbridge_packet_received()) and, once a frame turns out to be
+ * a completed IP packet, dispatches it to whichever module registered
+ * for its protocol number. feed_packet() below calls that DIF
+ * implementation's exact counterpart - a hand-built Ethernet frame - the
+ * same way dmnetbridge_handle_netif_rx() would after actually reading one
+ * off a real interface, without needing a real driver or a background
+ * pump thread to exercise it.
  */
 
 #define TEST_ETH_HEADER_LEN 14u
 #define TEST_ETHERTYPE_IPV4 0x0800u
 #define TEST_ETHERTYPE_IPV6 0x86DDu
+
+/* IANA reserves 253/254 "for experimentation and testing" (RFC 3692) -
+ * guaranteed not to collide with any real DMIP_PROTO_* this binary might
+ * ever add a handler for. */
+#define TEST_PROTOCOL_A 253u
+#define TEST_PROTOCOL_B 254u
 
 static void write_u16_be(uint8_t* p, uint16_t value)
 {
@@ -876,12 +882,12 @@ static void feed_packet(dmnetif_iface_t iface, uint16_t ethertype, const uint8_t
 /**
  * @brief Build a minimal, valid, unfragmented IPv4 packet (header + payload)
  */
-static size_t build_v4_packet(uint8_t* buffer, size_t buffer_len, dmip_addr_t src, dmip_addr_t dst, const uint8_t* payload, size_t payload_len)
+static size_t build_v4_packet(uint8_t* buffer, size_t buffer_len, uint8_t protocol, dmip_addr_t src, dmip_addr_t dst, const uint8_t* payload, size_t payload_len)
 {
     dmip_v4_header_t header = { 0 };
     header.total_length = (uint16_t)(DMIP_V4_HEADER_LEN + payload_len);
     header.ttl = DMIP_DEFAULT_TTL;
-    header.protocol = DMIP_PROTO_UDP;
+    header.protocol = protocol;
     header.src = src;
     header.dst = dst;
 
@@ -890,100 +896,243 @@ static size_t build_v4_packet(uint8_t* buffer, size_t buffer_len, dmip_addr_t sr
     return DMIP_V4_HEADER_LEN + payload_len;
 }
 
-DMOD_TEST_STEP(v4_receive_rejects_bad_arguments)
+/**
+ * @brief Build a minimal, valid, unfragmented IPv6 packet (header + payload)
+ */
+static size_t build_v6_packet(uint8_t* buffer, size_t buffer_len, uint8_t next_header, dmip_addr_t src, dmip_addr_t dst, const uint8_t* payload, size_t payload_len)
 {
-    uint8_t* out = NULL;
-    size_t out_len = 0;
+    dmip_v6_header_t header = { 0 };
+    header.payload_length = (uint16_t)payload_len;
+    header.hop_limit = DMIP_DEFAULT_HOP_LIMIT;
+    header.next_header = next_header;
+    header.src = src;
+    header.dst = dst;
 
-    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(0, NULL, &out_len, NULL), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(0, &out, NULL, NULL), -EINVAL);
+    dmip_v6_build_header(buffer, buffer_len, &header);
+    memcpy(buffer + DMIP_V6_HEADER_LEN, payload, payload_len);
+    return DMIP_V6_HEADER_LEN + payload_len;
 }
 
-DMOD_TEST_STEP(v4_receive_no_pending_packet_returns_eagain)
+/* ---- Protocol dispatch ----
+ *
+ * dmip dispatches a completed packet to exactly the handler registered
+ * for its protocol number (dmip_register_protocol()), a registered
+ * default handler, or drops it - never to a shared queue any receive
+ * call might pop from regardless of protocol (see dmip.md's "Protocol
+ * dispatch" section for the bug this replaced). Every step below
+ * registers, feeds a packet, asserts, then unregisters - state here
+ * would otherwise leak across steps, same discipline dmarp_test.c
+ * documents for its own cache entries.
+ */
+
+typedef struct
 {
-    uint8_t* out = NULL;
-    size_t out_len = 0;
-    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(0, &out, &out_len, NULL), -EAGAIN);
+    bool            called;
+    dmip_family_t   family;
+    dmnetif_iface_t iface;
+    uint8_t         packet[128];
+    size_t          packet_len;
+} handler_call_t;
+
+static handler_call_t g_last_call;
+static handler_call_t g_default_call;
+
+static void record_call(dmip_family_t family, dmnetif_iface_t iface, const uint8_t* packet, size_t packet_len)
+{
+    g_last_call.called = true;
+    g_last_call.family = family;
+    g_last_call.iface = iface;
+    g_last_call.packet_len = packet_len;
+    memcpy(g_last_call.packet, packet, packet_len);
 }
 
-DMOD_TEST_STEP(v4_receive_returns_packet_delivered_via_packet_received)
+/**
+ * @brief Distinct from record_call() so specific_registration_wins_over_default
+ *        can tell whether the specific or the default registrant actually
+ *        fired, rather than both writing the same g_last_call
+ */
+static void record_default_call(dmip_family_t family, dmnetif_iface_t iface, const uint8_t* packet, size_t packet_len)
 {
+    g_default_call.called = true;
+    g_default_call.family = family;
+    g_default_call.iface = iface;
+    g_default_call.packet_len = packet_len;
+    memcpy(g_default_call.packet, packet, packet_len);
+}
+
+DMOD_TEST_STEP(register_protocol_delivers_matching_v4_packet)
+{
+    memset(&g_last_call, 0, sizeof(g_last_call));
+    DMOD_TEST_EXPECT_EQ(dmip_register_protocol(TEST_PROTOCOL_A, record_call), 0);
+
     uint8_t payload[4] = { 11, 22, 33, 44 };
     uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
     dmip_addr_t src = make_v4(10, 3, 0, 1);
     dmip_addr_t dst = make_v4(10, 3, 0, 2);
-    size_t packet_len = build_v4_packet(packet, sizeof(packet), src, dst, payload, sizeof(payload));
+    size_t packet_len = build_v4_packet(packet, sizeof(packet), TEST_PROTOCOL_A, src, dst, payload, sizeof(payload));
 
     feed_packet(g_iface0, TEST_ETHERTYPE_IPV4, packet, packet_len);
 
-    uint8_t* out = NULL;
-    size_t out_len = 0;
-    dmnetif_iface_t out_iface = NULL;
-    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(0, &out, &out_len, &out_iface), 0);
-    DMOD_TEST_EXPECT_EQ(out_len, packet_len);
-    DMOD_TEST_EXPECT_TRUE(bytes_equal(out, packet, packet_len));
-    DMOD_TEST_EXPECT_EQ(out_iface, g_iface0);
+    DMOD_TEST_EXPECT_TRUE(g_last_call.called);
+    DMOD_TEST_EXPECT_EQ(g_last_call.family, dmip_family_v4);
+    DMOD_TEST_EXPECT_EQ(g_last_call.iface, g_iface0);
+    DMOD_TEST_EXPECT_EQ(g_last_call.packet_len, packet_len);
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(g_last_call.packet, packet, packet_len));
 
-    Dmod_Free(out);
+    dmip_unregister_protocol(TEST_PROTOCOL_A);
 }
 
-DMOD_TEST_STEP(v4_receive_ignores_non_ipv4_ethertype)
+DMOD_TEST_STEP(register_protocol_delivers_matching_v6_packet)
 {
+    /* Same protocol number, the other family - proves DMIP_PROTO_* is one
+     * shared numbering space, not per-family (IPv4's protocol field and
+     * IPv6's next_header both feed the same dispatch table). */
+    memset(&g_last_call, 0, sizeof(g_last_call));
+    DMOD_TEST_EXPECT_EQ(dmip_register_protocol(TEST_PROTOCOL_A, record_call), 0);
+
+    uint8_t payload[3] = { 7, 8, 9 };
+    uint8_t packet[DMIP_V6_HEADER_LEN + sizeof(payload)];
+    size_t packet_len = build_v6_packet(packet, sizeof(packet), TEST_PROTOCOL_A, make_v6(31), make_v6(32), payload, sizeof(payload));
+
+    feed_packet(g_iface1, TEST_ETHERTYPE_IPV6, packet, packet_len);
+
+    DMOD_TEST_EXPECT_TRUE(g_last_call.called);
+    DMOD_TEST_EXPECT_EQ(g_last_call.family, dmip_family_v6);
+    DMOD_TEST_EXPECT_EQ(g_last_call.iface, g_iface1);
+    DMOD_TEST_EXPECT_EQ(g_last_call.packet_len, packet_len);
+    DMOD_TEST_EXPECT_TRUE(bytes_equal(g_last_call.packet, packet, packet_len));
+
+    dmip_unregister_protocol(TEST_PROTOCOL_A);
+}
+
+DMOD_TEST_STEP(register_protocol_ignores_non_matching_packet)
+{
+    /* A packet claimed by nobody (TEST_PROTOCOL_B, no registrant, no
+     * default) must not reach a handler registered for a different
+     * protocol (TEST_PROTOCOL_A) - the exact cross-protocol stealing bug
+     * this whole mechanism replaced (see dmip.md). */
+    memset(&g_last_call, 0, sizeof(g_last_call));
+    DMOD_TEST_EXPECT_EQ(dmip_register_protocol(TEST_PROTOCOL_A, record_call), 0);
+
     uint8_t payload[2] = { 1, 2 };
     uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
-    build_v4_packet(packet, sizeof(packet), make_v4(10, 3, 1, 1), make_v4(10, 3, 1, 2), payload, sizeof(payload));
+    size_t packet_len = build_v4_packet(packet, sizeof(packet), TEST_PROTOCOL_B, make_v4(10, 3, 1, 1), make_v4(10, 3, 1, 2), payload, sizeof(payload));
 
-    feed_packet(g_iface0, TEST_ETHERTYPE_IPV6, packet, sizeof(packet));
+    feed_packet(g_iface0, TEST_ETHERTYPE_IPV4, packet, packet_len);
 
-    uint8_t* out = NULL;
-    size_t out_len = 0;
-    DMOD_TEST_EXPECT_EQ(dmip_v4_receive(0, &out, &out_len, NULL), -EAGAIN);
+    DMOD_TEST_EXPECT_FALSE(g_last_call.called);
+
+    dmip_unregister_protocol(TEST_PROTOCOL_A);
 }
 
-DMOD_TEST_STEP(v6_receive_rejects_bad_arguments)
+DMOD_TEST_STEP(register_protocol_rejects_null_handler)
 {
-    uint8_t* out = NULL;
-    size_t out_len = 0;
-
-    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(0, NULL, &out_len, NULL), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(0, &out, NULL, NULL), -EINVAL);
+    DMOD_TEST_EXPECT_EQ(dmip_register_protocol(TEST_PROTOCOL_A, NULL), -EINVAL);
 }
 
-DMOD_TEST_STEP(v6_receive_no_pending_packet_returns_eagain)
+DMOD_TEST_STEP(register_protocol_twice_returns_eexist)
 {
-    uint8_t* out = NULL;
-    size_t out_len = 0;
-    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(0, &out, &out_len, NULL), -EAGAIN);
+    DMOD_TEST_EXPECT_EQ(dmip_register_protocol(TEST_PROTOCOL_A, record_call), 0);
+    DMOD_TEST_EXPECT_EQ(dmip_register_protocol(TEST_PROTOCOL_A, record_call), -EEXIST);
+
+    dmip_unregister_protocol(TEST_PROTOCOL_A);
 }
 
-DMOD_TEST_STEP(v6_receive_returns_packet_delivered_via_packet_received)
+DMOD_TEST_STEP(unregister_protocol_stops_delivery)
 {
-    uint8_t payload[3] = { 7, 8, 9 };
-    dmip_v6_header_t header = { 0 };
-    header.payload_length = sizeof(payload);
-    header.hop_limit = DMIP_DEFAULT_HOP_LIMIT;
-    header.next_header = DMIP_PROTO_UDP;
-    header.src = make_v6(31);
-    header.dst = make_v6(32);
+    memset(&g_last_call, 0, sizeof(g_last_call));
+    DMOD_TEST_EXPECT_EQ(dmip_register_protocol(TEST_PROTOCOL_A, record_call), 0);
+    dmip_unregister_protocol(TEST_PROTOCOL_A);
 
-    uint8_t packet[DMIP_V6_HEADER_LEN + sizeof(payload)];
-    dmip_v6_build_header(packet, sizeof(packet), &header);
-    memcpy(packet + DMIP_V6_HEADER_LEN, payload, sizeof(payload));
+    uint8_t payload[2] = { 3, 4 };
+    uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
+    size_t packet_len = build_v4_packet(packet, sizeof(packet), TEST_PROTOCOL_A, make_v4(10, 3, 2, 1), make_v4(10, 3, 2, 2), payload, sizeof(payload));
 
-    feed_packet(g_iface1, TEST_ETHERTYPE_IPV6, packet, sizeof(packet));
+    feed_packet(g_iface0, TEST_ETHERTYPE_IPV4, packet, packet_len);
 
-    uint8_t* out = NULL;
-    size_t out_len = 0;
-    dmnetif_iface_t out_iface = NULL;
-    DMOD_TEST_EXPECT_EQ(dmip_v6_receive(0, &out, &out_len, &out_iface), 0);
-    DMOD_TEST_EXPECT_EQ(out_len, sizeof(packet));
-    DMOD_TEST_EXPECT_TRUE(bytes_equal(out, packet, sizeof(packet)));
-    DMOD_TEST_EXPECT_EQ(out_iface, g_iface1);
-
-    Dmod_Free(out);
+    DMOD_TEST_EXPECT_FALSE(g_last_call.called);
 }
 
-/* ---- Family-agnostic: send/receive dispatch ---- */
+DMOD_TEST_STEP(unregister_protocol_unregistered_is_safe)
+{
+    dmip_unregister_protocol(TEST_PROTOCOL_A);
+    dmip_unregister_protocol(TEST_PROTOCOL_A);
+}
+
+DMOD_TEST_STEP(default_protocol_receives_unclaimed_packet)
+{
+    memset(&g_last_call, 0, sizeof(g_last_call));
+    DMOD_TEST_EXPECT_EQ(dmip_register_default_protocol(record_call), 0);
+
+    uint8_t payload[2] = { 5, 6 };
+    uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
+    size_t packet_len = build_v4_packet(packet, sizeof(packet), TEST_PROTOCOL_A, make_v4(10, 3, 3, 1), make_v4(10, 3, 3, 2), payload, sizeof(payload));
+
+    feed_packet(g_iface0, TEST_ETHERTYPE_IPV4, packet, packet_len);
+
+    DMOD_TEST_EXPECT_TRUE(g_last_call.called);
+    DMOD_TEST_EXPECT_EQ(g_last_call.packet_len, packet_len);
+
+    dmip_unregister_default_protocol();
+}
+
+DMOD_TEST_STEP(specific_registration_wins_over_default)
+{
+    memset(&g_last_call, 0, sizeof(g_last_call));
+    memset(&g_default_call, 0, sizeof(g_default_call));
+    DMOD_TEST_EXPECT_EQ(dmip_register_default_protocol(record_default_call), 0);
+    DMOD_TEST_EXPECT_EQ(dmip_register_protocol(TEST_PROTOCOL_A, record_call), 0);
+
+    uint8_t payload[2] = { 7, 8 };
+    uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
+    size_t packet_len = build_v4_packet(packet, sizeof(packet), TEST_PROTOCOL_A, make_v4(10, 3, 4, 1), make_v4(10, 3, 4, 2), payload, sizeof(payload));
+
+    feed_packet(g_iface0, TEST_ETHERTYPE_IPV4, packet, packet_len);
+
+    DMOD_TEST_EXPECT_TRUE(g_last_call.called);
+    DMOD_TEST_EXPECT_FALSE(g_default_call.called);
+
+    dmip_unregister_protocol(TEST_PROTOCOL_A);
+    dmip_unregister_default_protocol();
+}
+
+DMOD_TEST_STEP(register_default_protocol_rejects_null_handler)
+{
+    DMOD_TEST_EXPECT_EQ(dmip_register_default_protocol(NULL), -EINVAL);
+}
+
+DMOD_TEST_STEP(register_default_protocol_twice_returns_eexist)
+{
+    DMOD_TEST_EXPECT_EQ(dmip_register_default_protocol(record_call), 0);
+    DMOD_TEST_EXPECT_EQ(dmip_register_default_protocol(record_call), -EEXIST);
+
+    dmip_unregister_default_protocol();
+}
+
+DMOD_TEST_STEP(unregister_default_protocol_stops_delivery)
+{
+    memset(&g_last_call, 0, sizeof(g_last_call));
+    DMOD_TEST_EXPECT_EQ(dmip_register_default_protocol(record_call), 0);
+    dmip_unregister_default_protocol();
+
+    uint8_t payload[2] = { 9, 10 };
+    uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
+    size_t packet_len = build_v4_packet(packet, sizeof(packet), TEST_PROTOCOL_A, make_v4(10, 3, 5, 1), make_v4(10, 3, 5, 2), payload, sizeof(payload));
+
+    /* Nobody registered, no default - dispatch_packet() must drop this
+     * safely (no crash), not just "not call our handler". */
+    feed_packet(g_iface0, TEST_ETHERTYPE_IPV4, packet, packet_len);
+
+    DMOD_TEST_EXPECT_FALSE(g_last_call.called);
+}
+
+DMOD_TEST_STEP(unregister_default_protocol_unregistered_is_safe)
+{
+    dmip_unregister_default_protocol();
+    dmip_unregister_default_protocol();
+}
+
+/* ---- Family-agnostic: send dispatch ---- */
 
 DMOD_TEST_STEP(send_rejects_null_header)
 {
@@ -1035,42 +1184,6 @@ DMOD_TEST_STEP(send_v4_family_dispatches_to_v4_send)
     dmroute_remove(route);
 }
 
-DMOD_TEST_STEP(receive_rejects_bad_arguments)
-{
-    dmip_family_t family = dmip_family_none;
-    uint8_t* out = NULL;
-    size_t out_len = 0;
-
-    DMOD_TEST_EXPECT_EQ(dmip_receive(0, NULL, &out, &out_len, NULL), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_receive(0, &family, NULL, &out_len, NULL), -EINVAL);
-    DMOD_TEST_EXPECT_EQ(dmip_receive(0, &family, &out, NULL, NULL), -EINVAL);
-}
-
-DMOD_TEST_STEP(receive_no_pending_packet_returns_eagain)
-{
-    dmip_family_t family = dmip_family_none;
-    uint8_t* out = NULL;
-    size_t out_len = 0;
-    DMOD_TEST_EXPECT_EQ(dmip_receive(0, &family, &out, &out_len, NULL), -EAGAIN);
-}
-
-DMOD_TEST_STEP(receive_returns_v4_packet_delivered_via_packet_received)
-{
-    uint8_t payload[2] = { 42, 43 };
-    uint8_t packet[DMIP_V4_HEADER_LEN + sizeof(payload)];
-    size_t packet_len = build_v4_packet(packet, sizeof(packet), make_v4(10, 3, 2, 1), make_v4(10, 3, 2, 2), payload, sizeof(payload));
-
-    feed_packet(g_iface0, TEST_ETHERTYPE_IPV4, packet, packet_len);
-
-    dmip_family_t family = dmip_family_none;
-    uint8_t* out = NULL;
-    size_t out_len = 0;
-    dmnetif_iface_t out_iface = NULL;
-    DMOD_TEST_EXPECT_EQ(dmip_receive(0, &family, &out, &out_len, &out_iface), 0);
-    DMOD_TEST_EXPECT_EQ(family, dmip_family_v4);
-    DMOD_TEST_EXPECT_EQ(out_len, packet_len);
-    DMOD_TEST_EXPECT_TRUE(bytes_equal(out, packet, packet_len));
-    DMOD_TEST_EXPECT_EQ(out_iface, g_iface0);
-
-    Dmod_Free(out);
-}
+/* There is no dmip_receive() anymore - see the "Protocol dispatch"
+ * section above for what replaced it (receiving is dispatched by
+ * protocol number, not pulled by a generic receive call). */

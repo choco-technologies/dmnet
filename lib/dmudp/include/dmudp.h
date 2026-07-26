@@ -18,12 +18,11 @@ extern "C" {
  *
  * dmudp builds/parses UDP segments (RFC 768) - source/destination port,
  * length, the pseudo-header checksum - and sends/receives them by calling
- * straight into dmip's own family-agnostic send/receive (dmip_send()/
- * dmip_receive()): dmudp itself never touches dmroute/dmarp/dmnetif
- * directly for I/O, dmip already does all of that. Building on top of an
- * IP layer that can actually put a packet on the wire is the entire point
- * of dmudp existing as its own module rather than a few more functions
- * bolted onto dmip.
+ * straight into dmip: dmudp itself never touches dmroute/dmarp/dmnetif
+ * directly for I/O, dmip (and, below it, dmnetbridge) already does all of
+ * that. Building on top of an IP layer that can actually put a packet on
+ * the wire is the entire point of dmudp existing as its own module
+ * rather than a few more functions bolted onto dmip.
  *
  * There is a single dmudp_send()/dmudp_receive() pair, not a per-family
  * split (dmudp_v4_send()/_v6_send(), dmudp_v4_receive()/_v6_receive()):
@@ -37,16 +36,22 @@ extern "C" {
  * honestly (-ENOSYS) rather than pretending. Receiving has no such gap;
  * dmudp_receive() handles either family from the start.
  *
- * dmudp is stateless: every call is a one-shot send or a one-shot
- * wait-and-parse. There is no socket/bind concept - a caller that wants
- * one can build it on top of dmudp_send()/_receive() (e.g. filtering
- * received segments by `out_dst_port` itself), the same way dmudp itself
- * is built on top of dmip rather than dmip growing a socket layer.
+ * dmudp has no socket/bind concept - there is no per-port registry, and
+ * dmudp_receive() hands back every datagram regardless of destination
+ * port (a caller that wants to filter by `out_dst_port` itself can). It
+ * does, however, own a small receive queue of its own: dmudp registers
+ * itself with dmip as the handler for UDP's IP protocol number
+ * (dmip_register_protocol(), see dmip.h's "Protocol registration"
+ * section) rather than pulling packets from dmip directly, since dmip no
+ * longer hands out packets to whoever asks - it dispatches by protocol.
+ * See src/dmudp.c for the receive-side detail.
  *
- * dmudp depends on dmip (send/receive, dmip_checksum(), dmip_addr_t) and,
- * transitively through it, dmroute (dmip_addr_t's real definition) and
- * dmnetif (dmnetif_iface_t). Every function here is plain Built-in API
- * (dmod_dmudp_api) - there is no per-system state to guard.
+ * dmudp depends on dmip (dmip_send(), dmip_checksum(), dmip_addr_t,
+ * protocol registration) and, transitively through it, dmroute
+ * (dmip_addr_t's real definition) and dmnetif (dmnetif_iface_t). Also
+ * depends on dmlist (its own receive queue) and dmosi (the mutex/
+ * semaphore guarding it). Every function here is plain Built-in API
+ * (dmod_dmudp_api).
  */
 
 /**
@@ -132,12 +137,14 @@ dmod_dmudp_api(1.0, int, _send, ( const dmip_addr_t* dst_ip, uint16_t dst_port, 
 /**
  * @brief Receive one UDP datagram of either family, if one is available
  *
- * Built on dmip_receive(), which waits (push-based, fed by dmnetbridge -
- * see dmip.c's "Receive queue" section) on any interface for a packet of
- * either family - checks the packet's protocol is DMIP_PROTO_UDP,
+ * Waits on dmudp's own receive queue, fed by dmudp_handle_ip_packet() -
+ * registered with dmip as the DMIP_PROTO_UDP handler (see this file's
+ * top comment and dmip.h's "Protocol registration" section) - which
  * verifies the checksum (dmudp_v4_checksum_valid()/_v6_checksum_valid()
- * depending on `*out_family`), and copies out just the UDP payload - the
- * caller never sees the surrounding IP packet.
+ * depending on the packet's family) and copies out just the UDP payload
+ * for every completed UDP packet dmip hands it, regardless of which
+ * interface it arrived on. The caller here never sees the surrounding IP
+ * packet.
  *
  * There is no separate dmudp_v4_receive()/_v6_receive(): unlike sending,
  * where the caller already knows the destination family up front,
@@ -163,9 +170,15 @@ dmod_dmudp_api(1.0, int, _send, ( const dmip_addr_t* dst_ip, uint16_t dst_port, 
  *                         Optional - pass NULL if not needed
  *
  * @return 0 if a datagram was received, -EAGAIN if none arrived within
- *         `timeout_ms`, -EPROTO if a packet was received but wasn't UDP
- *         (or wasn't a well-formed IPv4/IPv6 packet), -EBADMSG if the
- *         checksum didn't match, -ENOMEM if a required allocation failed
+ *         `timeout_ms`, -EINVAL if a required output parameter is NULL.
+ *         Unlike before this module registered with dmip
+ *         (dmip_register_protocol()) instead of pulling packets itself,
+ *         a malformed packet or a checksum mismatch is no longer
+ *         something this call can report - dmudp_handle_ip_packet()
+ *         (see src/dmudp.c) silently drops those the moment they're
+ *         handed to it, before anything reaches this queue, the same way
+ *         dmip's own packet_received DIF implementation silently drops
+ *         what isn't a well-formed packet
  */
 dmod_dmudp_api(1.0, int, _receive, ( uint32_t timeout_ms, dmip_family_t* out_family, dmip_addr_t* out_src_ip, uint16_t* out_src_port, uint16_t* out_dst_port, uint8_t** out_payload, size_t* out_payload_len, dmnetif_iface_t* out_iface ));
 

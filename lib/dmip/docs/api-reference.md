@@ -52,7 +52,6 @@ See [dmip.md](dmip.md) for the rationale behind this module's design.
 | `dmip_v4_reassemble(fragment, length, out_packet, out_length)` | Feed one received IPv4 packet through reassembly |
 | `dmip_v4_get_source_address(dst, out_src)` | Find the source address `dmip_v4_send()` would use to reach `dst` - a thin call to `dmnetbridge_get_source_address()` |
 | `dmip_v4_send(header, payload, payload_len, arp_timeout_ms)` | Build, fragment (if needed) and transmit a complete IPv4 packet - each fragment goes through `dmnetbridge_send()` (route lookup, ARP resolution, `dmnetif_send()`) |
-| `dmip_v4_receive(timeout_ms, out_packet, out_length, out_iface)` | Wait up to `timeout_ms` for an inbound IPv4 packet, push-fed by dmip's own `packet_received` DIF implementation (see [dmip.md](dmip.md#send--receive)) |
 
 ### IPv6
 
@@ -64,7 +63,8 @@ See [dmip.md](dmip.md) for the rationale behind this module's design.
 | `dmip_v6_next_identification(void)` | Next value from the system-wide IPv6 fragment identification counter |
 | `dmip_v6_fragment(header, payload, payload_len, mtu, identification, callback, user_data)` | Split `payload` into `mtu`-sized IPv6 packets, adding a Fragment header if needed |
 | `dmip_v6_reassemble(fragment, length, out_packet, out_length)` | Feed one received IPv6 packet through reassembly |
-| `dmip_v6_receive(timeout_ms, out_packet, out_length, out_iface)` | Wait up to `timeout_ms` for an inbound IPv6 packet, push-fed the same way as `dmip_v4_receive()`. No `dmip_v6_send()` yet - see [dmip.md](dmip.md#send--receive) |
+
+No `dmip_v6_send()` yet - see [dmip.md](dmip.md#send--receive).
 
 ### Family-agnostic
 
@@ -72,6 +72,19 @@ See [dmip.md](dmip.md) for the rationale behind this module's design.
 |------------------|--------------|
 | `dmip_header_t` | `{ family; union { dmip_v4_header_t v4; dmip_v6_header_t v6; } header; }` - set `family`, fill in the matching union member |
 | `dmip_send(header, payload, payload_len, arp_timeout_ms)` | Dispatches to `dmip_v4_send()` for `dmip_family_v4`; `-ENOSYS` for `dmip_family_v6` (no `dmip_v6_send()` yet); `-EINVAL` if `header` is `NULL` or `family` is neither |
-| `dmip_receive(timeout_ms, out_family, out_packet, out_length, out_iface)` | Waits on the same receive queue for either family - see [dmip.md](dmip.md#family-agnostic-dmip_send-dmip_receive) for why this isn't the same as calling `dmip_v4_receive()`/`_v6_receive()` back to back |
+
+### Protocol registration
+
+There is no `dmip_receive()`/`dmip_v4_receive()`/`_v6_receive()` anymore -
+receiving is dispatched by protocol number instead, see
+[dmip.md](dmip.md#protocol-dispatch) for why.
+
+| Function | Description |
+|----------|--------------|
+| `dmip_protocol_handler_t` | `void (*)(dmip_family_t family, dmnetif_iface_t iface, const uint8_t* packet, size_t packet_len)` - callback type for the two `_register_*` functions below. `packet` is borrowed, valid only for the call |
+| `dmip_register_protocol(protocol, handler)` | Register `handler` as the sole receiver of packets whose protocol/next_header number is `protocol` (e.g. `DMIP_PROTO_UDP`). `0` on success, `-EINVAL` (NULL handler), `-EEXIST` (already registered), `-ENOMEM` |
+| `dmip_unregister_protocol(protocol)` | Undo the above. Safe to call for an unregistered protocol |
+| `dmip_register_default_protocol(handler)` | Register `handler` as the fallback for any packet whose protocol has no specific registrant. Only one at a time - `-EEXIST` if already set |
+| `dmip_unregister_default_protocol(void)` | Undo the above. Safe to call with none registered |
 
 See `include/dmip.h` for full parameter/return documentation on every function above.
