@@ -18,12 +18,13 @@ target_include_directories(${DMOD_MODULE_NAME} PRIVATE
 #              implementation directly via Dmod_GetNextDifModule()/
 #              Dmod_GetDifFunction(), the same way
 #              dmnetbridge_handle_netif_rx() itself does.
-target_link_libraries(${DMOD_MODULE_NAME} dmip_if dmnetbridge_if)
+target_link_libraries(${DMOD_MODULE_NAME} dmip_if )
 
 # dmnetif: the send/receive test steps register dmnetif fixture interfaces
 #          by hand (see dmip_test.c's file comment).
 # dmroute: routes are seeded by hand - see dmip_test.c's file comment.
 dmod_link_modules(${DMOD_MODULE_NAME}
+    dmnetbridge
     dmarp
     dmnetif
     dmroute

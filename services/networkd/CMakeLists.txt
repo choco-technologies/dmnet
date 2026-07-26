@@ -27,15 +27,6 @@ dmod_add_executable(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
     src/networkd.c
 )
 
-# dmnetbridge: dmnetbridge_reset()/_handle_netif_rx() - the whole point of
-# this service. An in-tree sibling under dmnet/lib (added earlier via the
-# top-level add_subdirectory(lib) - see dmnet/CMakeLists.txt and
-# lib/CMakeLists.txt), not a separately published module, so it's linked
-# directly rather than through dmod_link_modules() (which fetches a
-# *released* module's headers via dmf-get and would fail here since it has
-# no such release).
-target_link_libraries(${DMOD_MODULE_NAME} dmnetbridge_if)
-
 # dmnetif: dmnetif_for_each() to enumerate already-registered interfaces,
 #          dmnetif_get_name()/dmnetif_is_present() for pump-thread
 #          naming/shutdown - see src/networkd.c. A separately published
@@ -46,6 +37,7 @@ target_link_libraries(${DMOD_MODULE_NAME} dmnetbridge_if)
 # dmosi:   dmosi_thread_create()/_join()/_kill()/_destroy()/_sleep() to run
 #          and stop pump threads
 dmod_link_modules(${DMOD_MODULE_NAME}
+    dmnetbridge
     dmnetif
     dmroute
     dmlist
