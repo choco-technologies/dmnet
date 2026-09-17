@@ -96,7 +96,9 @@ DMOD_TEST_STEP(route_with_no_verb_defaults_to_show)
 
 DMOD_TEST_STEP(unknown_object_fails)
 {
-    char* argv[] = { "ip", "addr" };
+    /* "link" is the one iproute2 object neither route show/add/del nor
+     * addr show/add cover - unlike "addr" (see below), which now succeeds. */
+    char* argv[] = { "ip", "link" };
     DMOD_TEST_EXPECT_NE(Dmod_RunModule("ip", 2, argv), 0);
 }
 
@@ -226,6 +228,99 @@ DMOD_TEST_STEP(route_get_is_equivalent_to_show)
 
     char* get_argv[] = { "ip", "route", "get", "10.1.2.3" };
     DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ip", 4, get_argv), 0);
+}
+
+/* ---- addr show ---- */
+
+DMOD_TEST_STEP(addr_show_with_no_address_succeeds)
+{
+    char* argv[] = { "ip", "addr" };
+    DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ip", 2, argv), 0);
+}
+
+DMOD_TEST_STEP(addr_show_verb_succeeds)
+{
+    char* argv[] = { "ip", "addr", "show" };
+    DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ip", 3, argv), 0);
+}
+
+DMOD_TEST_STEP(addr_show_one_iface_succeeds)
+{
+    char* argv[] = { "ip", "addr", "show", "test0" };
+    DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ip", 4, argv), 0);
+}
+
+DMOD_TEST_STEP(addr_show_unknown_iface_fails)
+{
+    char* argv[] = { "ip", "addr", "show", "does-not-exist" };
+    DMOD_TEST_EXPECT_NE(Dmod_RunModule("ip", 4, argv), 0);
+}
+
+/* ---- addr add ---- */
+
+DMOD_TEST_STEP(addr_add_with_prefix_sets_address_and_netmask)
+{
+    char* argv[] = { "ip", "addr", "add", "192.168.1.10/24", "dev", "test0" };
+    DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ip", 6, argv), 0);
+
+    dmroute_addr_t ip = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_ip_address(g_iface, &ip), 0);
+    DMOD_TEST_EXPECT_EQ(ip.family, dmroute_family_v4);
+    DMOD_TEST_EXPECT_EQ(ip.addr.v4[0], (uint8_t)192);
+    DMOD_TEST_EXPECT_EQ(ip.addr.v4[3], (uint8_t)10);
+
+    dmroute_addr_t netmask = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_netmask(g_iface, &netmask), 0);
+    DMOD_TEST_EXPECT_EQ(netmask.family, dmroute_family_v4);
+    DMOD_TEST_EXPECT_EQ(netmask.addr.v4[3], (uint8_t)0);
+}
+
+DMOD_TEST_STEP(addr_add_without_prefix_uses_host_netmask)
+{
+    char* argv[] = { "ip", "addr", "add", "192.168.1.20", "dev", "test0" };
+    DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ip", 6, argv), 0);
+
+    dmroute_addr_t netmask = { 0 };
+    DMOD_TEST_EXPECT_EQ(dmnetif_get_netmask(g_iface, &netmask), 0);
+    DMOD_TEST_EXPECT_EQ(netmask.addr.v4[3], (uint8_t)255);
+}
+
+DMOD_TEST_STEP(addr_add_registers_connected_route)
+{
+    char* argv[] = { "ip", "addr", "add", "192.168.1.10/24", "dev", "test0" };
+    DMOD_TEST_EXPECT_EQ(Dmod_RunModule("ip", 6, argv), 0);
+
+    dmroute_addr_t neighbor = make_v4(192, 168, 1, 200);
+    dmroute_route_t route = dmroute_lookup(&neighbor);
+    DMOD_TEST_EXPECT_NOT_NULL(route);
+    if (route != NULL)
+    {
+        DMOD_TEST_EXPECT_EQ(dmroute_get_origin(route), dmroute_origin_connected);
+    }
+}
+
+DMOD_TEST_STEP(addr_add_without_dev_fails)
+{
+    char* argv[] = { "ip", "addr", "add", "192.168.1.10/24" };
+    DMOD_TEST_EXPECT_NE(Dmod_RunModule("ip", 4, argv), 0);
+}
+
+DMOD_TEST_STEP(addr_add_unknown_interface_fails)
+{
+    char* argv[] = { "ip", "addr", "add", "192.168.1.10/24", "dev", "does-not-exist" };
+    DMOD_TEST_EXPECT_NE(Dmod_RunModule("ip", 6, argv), 0);
+}
+
+DMOD_TEST_STEP(addr_add_invalid_address_fails)
+{
+    char* argv[] = { "ip", "addr", "add", "not-an-address", "dev", "test0" };
+    DMOD_TEST_EXPECT_NE(Dmod_RunModule("ip", 6, argv), 0);
+}
+
+DMOD_TEST_STEP(addr_unknown_verb_fails)
+{
+    char* argv[] = { "ip", "addr", "frobnicate" };
+    DMOD_TEST_EXPECT_NE(Dmod_RunModule("ip", 3, argv), 0);
 }
 
 /* ---- automatic registration (dmroute's dmnetif DIF, exercised without ip at all) ---- */

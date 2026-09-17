@@ -3,9 +3,11 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 
 `ip` DMOD application module - a CLI to inspect and control the IP routing
-table managed by dmroute. It never touches dmroute's
-internals directly, only its public add/remove/lookup/for_each API, the
-same boundary `ifconfig` enforces around `dmnetif`.
+table managed by dmroute, and to assign interface addresses via dmnetif.
+`ip route` never touches dmroute's internals directly, only its public
+add/remove/lookup/for_each API, the same boundary `ifconfig` enforces
+around `dmnetif`'s read side; `ip addr add` is the only place in this
+whole tree that assigns an address rather than just displaying one.
 
 ## Usage
 
@@ -15,12 +17,15 @@ ip route show <dest>                                                    Show the
 ip route get <dest>                                                     Same as 'route show <dest>'
 ip route add <dest>[/<prefixlen>] [via <gw>] dev <iface> [metric <n>]   Add a route
 ip route del <dest>[/<prefixlen>] dev <iface>                           Remove a route
+ip addr [show]                                                          List every interface's address
+ip addr show <iface>                                                    Show one interface's address
+ip addr add <addr>/<prefixlen> dev <iface>                              Assign a static address
 ip --help | -h                                                          Show this help
 ```
 
-`<dest>` is an IPv4 address, `"A.B.C.D/N"` CIDR notation, or `"default"`.
-Only IPv4 is supported by this CLI (dmroute itself is family-agnostic, see
-[docs/ip.md](docs/ip.md)).
+`<dest>`/`<addr>` is an IPv4 address, `"A.B.C.D/N"` CIDR notation, or
+(route only) `"default"`. Only IPv4 is supported by this CLI (dmroute and
+dmnetif are both family-agnostic, see [docs/ip.md](docs/ip.md)).
 
 Example output:
 
@@ -29,6 +34,12 @@ $ ip route
 default via 192.168.1.1 dev eth0 metric 50
 192.168.1.0/24 dev eth0 metric 0 connected
 10.0.0.0/8 via 192.168.1.254 dev eth0 metric 100
+```
+
+```
+$ ip addr add 192.168.1.42/24 dev eth0
+$ ip addr
+eth0: 192.168.1.42/24
 ```
 
 You do not need to `ip route add` an interface's own subnet - dmroute adds

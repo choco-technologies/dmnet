@@ -1,14 +1,18 @@
 /**
  * @file ip.c
- * @brief ip - inspect and control dmroute's IP routing table
+ * @brief ip - inspect and control dmroute's IP routing table, and assign
+ *        interface addresses via dmnetif
  *
- * A thin CLI over dmroute's API (`ip route ...`), the way ifconfig is a
- * thin CLI over dmnetif's - never touches dmroute's dmlist/mutex
- * internals, only its public add/remove/lookup/for_each surface. Follows
- * Linux `iproute2`'s `ip route` subset closely enough to be familiar, but
- * only covers what dmroute actually tracks (IPv4 only - dmroute itself is
- * family-agnostic, but there is no IPv6 text parser here yet, same
- * limitation ifconfig has for `create`/`broadcast`).
+ * A thin CLI over dmroute's API (`ip route ...`) and, for `ip addr`, over
+ * dmnetif's `_set_ip_address()`/`_set_netmask()` - the way ifconfig is a
+ * thin CLI over dmnetif's read side (`ifconfig` can only display an
+ * address, never assign one - see its own docs). Follows Linux
+ * `iproute2`'s `ip route`/`ip addr` subset closely enough to be familiar,
+ * but only covers what dmroute/dmnetif actually track (IPv4 only - both
+ * are family-agnostic, but there is no IPv6 text parser here yet, same
+ * limitation ifconfig has for `create`/`broadcast`). `ip addr add` does
+ * not bring the interface up - that is `ifconfig <iface> up`'s job, kept
+ * a separate concern the same way real `ip addr`/`ip link set up` are.
  */
 #include "dmod.h"
 #include "dmroute.h"
@@ -216,8 +220,11 @@ static void print_usage(const char* prog)
     Dmod_Printf("  %s route get <dest>                                      Same as 'route show <dest>'\n", prog);
     Dmod_Printf("  %s route add <dest>[/<prefixlen>] [via <gw>] dev <iface> [metric <n>]  Add a route\n", prog);
     Dmod_Printf("  %s route del <dest>[/<prefixlen>] dev <iface>            Remove a route\n", prog);
+    Dmod_Printf("  %s addr [show]                                           List every interface's address\n", prog);
+    Dmod_Printf("  %s addr show <iface>                                     Show one interface's address\n", prog);
+    Dmod_Printf("  %s addr add <addr>/<prefixlen> dev <iface>               Assign a static address\n", prog);
     Dmod_Printf("  %s --help | -h                                           Show this help\n", prog);
-    Dmod_Printf("\n<dest> is an IPv4 address, \"A.B.C.D/N\" CIDR notation, or \"default\".\n");
+    Dmod_Printf("\n<dest>/<addr> is an IPv4 address, \"A.B.C.D/N\" CIDR notation, or \"default\" (route only).\n");
 }
 
 static int cmd_show_one(const char* prog, const char* dest_str)
@@ -402,6 +409,115 @@ static int cmd_route_del(const char* prog, int argc, char* argv[])
     return 0;
 }
 
+/* `ip addr add <addr>/<prefixlen> dev <iface>` - the only address-
+ * assignment path in this whole tree: neither ifconfig nor this CLI's
+ * own `route` side ever calls dmnetif_set_ip_address()/_set_netmask()
+ * (see this file's header comment). Netmask is set before address, same
+ * order networkd/a DHCP client would use, so dmnetif's connected-route
+ * registration (dmnetif_set_ip_address() -> dmroute_add(), see dmnetif's
+ * own docs) never falls back to an all-ones host mask for a split second
+ * in between. */
+static int cmd_addr_add(const char* prog, int argc, char* argv[])
+{
+    /* argv[0] == "add", argv[1] == "<addr>[/<prefixlen>]" */
+    if (argc < 4 || strcmp(argv[2], "dev") != 0)
+    {
+        print_usage(prog);
+        return 1;
+    }
+
+    dmroute_addr_t address = { 0 };
+    dmroute_addr_t netmask = { 0 };
+    if (!parse_destination(argv[1], &address, &netmask))
+    {
+        Dmod_Printf("%s: invalid address '%s'\n", prog, argv[1]);
+        return 1;
+    }
+
+    const char* iface_name = argv[3];
+    dmnetif_iface_t iface = dmnetif_find_by_name(iface_name);
+    if (iface == NULL)
+    {
+        Dmod_Printf("%s: unknown interface '%s'\n", prog, iface_name);
+        return 1;
+    }
+
+    int ret = dmnetif_set_netmask(iface, &netmask);
+    if (ret != 0)
+    {
+        Dmod_Printf("%s: failed to set netmask on '%s': %d\n", prog, iface_name, ret);
+        return 1;
+    }
+
+    ret = dmnetif_set_ip_address(iface, &address);
+    if (ret != 0)
+    {
+        Dmod_Printf("%s: failed to set address on '%s': %d\n", prog, iface_name, ret);
+        return 1;
+    }
+
+    return 0;
+}
+
+static void print_iface_addr(dmnetif_iface_t iface)
+{
+    const char* name = dmnetif_get_name(iface);
+    Dmod_Printf("%s: ", (name != NULL) ? name : "?");
+
+    dmroute_addr_t ip = { 0 };
+    if (dmnetif_get_ip_address(iface, &ip) != 0 || ip.family != dmroute_family_v4)
+    {
+        Dmod_Printf("no address\n");
+        return;
+    }
+
+    print_ipv4_address(&ip);
+
+    dmroute_addr_t netmask = { 0 };
+    if (dmnetif_get_netmask(iface, &netmask) == 0 && netmask.family == dmroute_family_v4)
+    {
+        Dmod_Printf("/%d", netmask_to_prefix_len(&netmask));
+    }
+    Dmod_Printf("\n");
+}
+
+static bool print_addr_visitor(dmnetif_iface_t iface, void* user_data)
+{
+    (void)user_data;
+    print_iface_addr(iface);
+    return true;
+}
+
+static int cmd_addr(const char* prog, int argc, char* argv[])
+{
+    /* argv[0] == "addr" */
+    if (argc == 1 || strcmp(argv[1], "show") == 0)
+    {
+        if (argc > 2)
+        {
+            dmnetif_iface_t iface = dmnetif_find_by_name(argv[2]);
+            if (iface == NULL)
+            {
+                Dmod_Printf("%s: unknown interface '%s'\n", prog, argv[2]);
+                return 1;
+            }
+            print_iface_addr(iface);
+            return 0;
+        }
+
+        dmnetif_for_each(print_addr_visitor, NULL);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "add") == 0)
+    {
+        return cmd_addr_add(prog, argc - 1, &argv[1]);
+    }
+
+    print_usage(prog);
+    return 1;
+}
+
 int main(int argc, char *argv[])
 {
     const char* prog = (argc > 0 && argv[0] != NULL) ? argv[0] : "ip";
@@ -410,6 +526,11 @@ int main(int argc, char *argv[])
     {
         print_usage(prog);
         return 0;
+    }
+
+    if (argc >= 2 && strcmp(argv[1], "addr") == 0)
+    {
+        return cmd_addr(prog, argc - 1, &argv[1]);
     }
 
     if (argc < 2 || strcmp(argv[1], "route") != 0)

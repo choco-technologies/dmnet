@@ -2,19 +2,22 @@
 
 ## Overview
 
-`ip` is a CLI over dmroute's API - it inspects and
-controls the IP routing table, following `iproute2`'s `ip route` subset
-closely enough to be familiar. Like `ifconfig` does for `dmnetif`, it never
-touches dmroute's internals directly, only its public add/remove/lookup/
-for_each functions.
+`ip` is a CLI over dmroute's API (`ip route ...`) and, for `ip addr`, over
+dmnetif's address-assignment API - it inspects and controls the IP routing
+table and interface addresses, following `iproute2`'s `ip route`/`ip addr`
+subset closely enough to be familiar. Like `ifconfig` does for `dmnetif`'s
+read side, `ip route` never touches dmroute's internals directly, only its
+public add/remove/lookup/for_each functions; `ip addr add` is the only
+place in this whole tree that calls `dmnetif_set_ip_address()`/
+`_set_netmask()` - `ifconfig` can only display an address, never assign
+one.
 
-Only `ip route ...` is implemented - there is no `ip addr`/`ip link`
-(that's what [ifconfig](../../ifconfig) is for) - and only IPv4: dmroute
-itself is family-agnostic, but this CLI has no IPv6 text parser yet. A
-route to an IPv6 destination (possible if an interface is given an IPv6
-address - see dmroute's automatic registration below) still shows up in
-`ip route show`, just as `(unsupported address family)` rather than a
-decoded address.
+There is no `ip link` (that's what [ifconfig](../../ifconfig) is for), and
+only IPv4: both dmroute and dmnetif are family-agnostic, but this CLI has
+no IPv6 text parser yet. A route to an IPv6 destination (possible if an
+interface is given an IPv6 address - see dmroute's automatic registration
+below) still shows up in `ip route show`, just as `(unsupported address
+family)` rather than a decoded address.
 
 ## Usage
 
@@ -24,12 +27,22 @@ ip route show <dest>                                                    Show the
 ip route get <dest>                                                     Same as 'route show <dest>'
 ip route add <dest>[/<prefixlen>] [via <gw>] dev <iface> [metric <n>]   Add a route
 ip route del <dest>[/<prefixlen>] dev <iface>                           Remove a route
+ip addr [show]                                                          List every interface's address
+ip addr show <iface>                                                    Show one interface's address
+ip addr add <addr>/<prefixlen> dev <iface>                              Assign a static address
 ip --help | -h                                                          Show this help
 ```
 
-`<dest>` is an IPv4 address, `"A.B.C.D/N"` CIDR notation, or `"default"`
-(equivalent to `0.0.0.0/0`). A bare address without `/N` is a host route
-(`/32`), matching `iproute2`'s own default.
+`<dest>`/`<addr>` is an IPv4 address, `"A.B.C.D/N"` CIDR notation, or
+(route only) `"default"` (equivalent to `0.0.0.0/0`). A bare address
+without `/N` is a host route/address (`/32`), matching `iproute2`'s own
+default.
+
+`ip addr add` sets the netmask before the address, so dmnetif's
+connected-route registration (see below) never falls back to an all-ones
+host mask for a split second in between. It does not bring the interface
+up - that's `ifconfig <iface> up`'s job, kept a separate concern the same
+way real `ip addr`/`ip link set up` are.
 
 Example output:
 
@@ -49,6 +62,12 @@ actually tracks.
 + egress interface (the same identity `iproute2` uses) - not by looking up
 which route a single address would take, which is what `route show
 <dest>`/`route get` do instead.
+
+```
+$ ip addr add 192.168.1.42/24 dev eth0
+$ ip addr
+eth0: 192.168.1.42/24
+```
 
 ## Automatic registration
 
