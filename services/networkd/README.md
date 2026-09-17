@@ -42,6 +42,14 @@ This application module can be loaded and executed using the DMOD loader:
 dmod_loader /path/to/networkd.dmf
 ```
 
+### Starting at boot
+
+[`configs/networkd.ini`](configs/networkd.ini) is a `libsystemd` unit file
+(see [dmsystem's configuration.md](../../../dmsystem/app/libsystemd/docs/configuration.md)
+for the unit file format) that starts networkd automatically. Drop it into
+the directory scanned by `libsystemd_scan()` to have `service` bring
+networkd up at boot alongside the rest of the system's units.
+
 ## Documentation
 
 See the `docs/` directory:
@@ -54,6 +62,7 @@ View documentation using `dmf-man networkd`.
 
 ```
 networkd/
+├── configs/           # libsystemd unit file (starts networkd at boot)
 ├── docs/              # Documentation (markdown format)
 ├── src/
 │   └── networkd.c
