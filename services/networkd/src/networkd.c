@@ -35,6 +35,19 @@
 #define NETWORKD_MAIN_LOOP_SLEEP_MS 1000u
 
 /**
+ * @brief Priority each interface's pump thread runs at
+ *
+ * Above the idle priority on purpose. A pump left at priority 0 shares it
+ * with the idle task, so the semaphore post the RX ISR makes never sets
+ * FreeRTOS's xHigherPriorityTaskWoken - waking the pump cannot preempt
+ * anything, and it has to wait for its next round-robin slice instead of
+ * running as soon as the frame is there. Raising it is what turns "a frame
+ * arrived" into a scheduling event rather than a hint picked up at the next
+ * tick.
+ */
+#define NETWORKD_PUMP_THREAD_PRIORITY 0
+
+/**
  * @brief One interface's pump thread
  */
 typedef struct
@@ -77,7 +90,8 @@ static bool spawn_pump(dmnetif_iface_t iface, void* user_data)
     }
 
     pump->iface = iface;
-    pump->thread = dmosi_thread_create(pump_thread_entry, iface, 0, 4096, dmnetif_get_name(iface), NULL);
+    pump->thread = dmosi_thread_create(pump_thread_entry, iface, NETWORKD_PUMP_THREAD_PRIORITY,
+                                       4096, dmnetif_get_name(iface), NULL);
     if (pump->thread == NULL)
     {
         DMOD_LOG_ERROR("networkd: cannot start pump thread for '%s'\n", dmnetif_get_name(iface));

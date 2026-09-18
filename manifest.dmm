@@ -3,12 +3,13 @@ $include https://github.com/choco-technologies/dmnet/releases/download/vlatest/v
 
 # Module entries with version placeholder - expanded by $version-available.
 # This repo defines several independent modules (the top-level dmnet
-# library, dmip/dmarp under lib/, and the ifconfig/ip CLIs under tools/,
-# plus each one's test module) - the release workflow packages all of them
-# per full architecture (<arch_name>), not per CPU family, since none of
-# them are hardware ports (contrast with dmeth/manifest.dmm's dmeth_port
-# entry). dmroute and dmnetif now live in their own repositories/manifests
-# and are fetched from there via dmod_link_modules().
+# library, dmip/dmarp under lib/, the ifconfig/ip CLIs under tools/ and the
+# networkd service under services/, plus each one's test module) - the
+# release workflow packages all of them per full architecture (<arch_name>),
+# not per CPU family, since none of them are hardware ports (contrast with
+# dmeth/manifest.dmm's dmeth_port entry). dmroute and dmnetif now live in
+# their own repositories/manifests and are fetched from there via
+# dmod_link_modules().
 dmnet          https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmnet-v<version>-<arch_name>.zip
 test_dmnet     https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_dmnet-v<version>-<arch_name>.zip
 dmip           https://github.com/choco-technologies/dmnet/releases/download/v<version>/dmip-v<version>-<arch_name>.zip
@@ -19,3 +20,5 @@ ifconfig       https://github.com/choco-technologies/dmnet/releases/download/v<v
 test_ifconfig  https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_ifconfig-v<version>-<arch_name>.zip
 ip             https://github.com/choco-technologies/dmnet/releases/download/v<version>/ip-v<version>-<arch_name>.zip
 test_ip        https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_ip-v<version>-<arch_name>.zip
+networkd       https://github.com/choco-technologies/dmnet/releases/download/v<version>/networkd-v<version>-<arch_name>.zip
+test_networkd  https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_networkd-v<version>-<arch_name>.zip
