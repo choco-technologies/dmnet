@@ -6,13 +6,27 @@ networkd DMOD application module.
 
 ## Description
 
-networkd owns reading every network interface. It spawns one dedicated
-thread per interface already registered with `dmnetif` at startup, each
-running `dmnetbridge_handle_netif_rx(iface)` - the only code path allowed
-to call `dmnetif_receive()` on a given interface once this service owns
-it (see [dmnetbridge's docs](../../lib/dmnetbridge/docs/dmnetbridge.md)).
-This is what lets `dmip`/`dmudp` receive a packet from *any* interface
-without ever naming one themselves.
+networkd reads one network interface. Each instance runs
+`dmnetbridge_handle_netif_rx(iface)` for the interface named on its command
+line - the only code path allowed to call `dmnetif_receive()` on that
+interface while the instance owns it (see
+[dmnetbridge's docs](../../lib/dmnetbridge/docs/dmnetbridge.md)). This is
+what lets `dmip`/`dmudp` receive a packet from *any* interface without ever
+naming one themselves.
+
+There is one instance per interface, started automatically: `dmnetif`
+reports every interface it registers as a `netif` class device, and
+[`configs/networkd.rules`](configs/networkd.rules) maps that class to
+[`configs/networkd@.ini`](configs/networkd@.ini), so libsystemd instantiates
+`networkd@<interface>` for each one. Same shape `console@.ini` has for tty
+nodes.
+
+The pump runs on the instance's own stack, not on a thread spawned beside
+it: with a single interface to read there is nothing for the process to do
+afterwards, so a supervisor thread would only sleep until killed - one extra
+stack per interface, bought for nothing. It also means an interface that
+appears after boot gets a pump like any other, rather than being missed
+because enumeration already happened.
 
 ## Building
 
@@ -36,19 +50,27 @@ make DMOD_MODE=DMOD_MODULE DMOD_DIR=/path/to/dmod
 
 ## Usage
 
-This application module can be loaded and executed using the DMOD loader:
+networkd takes the interface to pump as its only argument, and runs until
+that interface goes away:
 
 ```bash
-dmod_loader /path/to/networkd.dmf
+dmod_loader /path/to/networkd.dmf eth0
 ```
 
 ### Starting at boot
 
-[`configs/networkd.ini`](configs/networkd.ini) is a `libsystemd` unit file
-(see [dmsystem's configuration.md](../../../dmsystem/app/libsystemd/docs/configuration.md)
-for the unit file format) that starts networkd automatically. Drop it into
-the directory scanned by `libsystemd_scan()` to have `service` bring
-networkd up at boot alongside the rest of the system's units.
+Nothing needs to start networkd by hand. Install both files from `configs/`:
+[`networkd@.ini`](configs/networkd@.ini) into the directory scanned by
+`libsystemd_scan()`, and [`networkd.rules`](configs/networkd.rules) into the
+one passed to `libsystemd_load_rules()` (see
+[dmsystem's configuration.md](../../../dmsystem/app/libsystemd/docs/configuration.md)
+for both formats). From then on every interface `dmnetif` registers starts
+its own `networkd@<interface>`.
+
+Note that `networkd@.ini` is a *template*: on its own it starts nothing, so
+an installation that omits the rules file gets no pump at all. Conversely
+`service start networkd@eth0` works without the rules file, since libsystemd
+instantiates a template on demand.
 
 ## Documentation
 

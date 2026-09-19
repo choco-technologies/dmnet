@@ -31,6 +31,11 @@ readme=./README.md => ${destination}/${module}/README.md [origin=${repo_dir}/ser
 # Include directory with all headers (public header + generated <module>_defs.h)
 inc=./include => ${destination}/${module}/include [origin=${repo_dir}/services/networkd/include] [origin=${build_dir}/services/networkd/${module}_defs.h]
 
+# === Configuration ===
+# Unit template + device rule that start one instance per interface - without
+# these the module ships but nothing ever starts it.
+configs=./configs => ${destination}/${module}/configs [origin=${repo_dir}/services/networkd/configs]
+
 # === License ===
 # License file - shared at the dmnet repo root (see lib/dmarp/dmarp.dmr
 # for the same "nested module shares the parent repo's LICENSE" convention)

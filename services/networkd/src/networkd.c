@@ -1,183 +1,71 @@
 /**
  * @file networkd.c
- * @brief networkd - drives dmnetbridge_handle_netif_rx() for every
- *        registered network interface
+ * @brief networkd - runs dmnetbridge_handle_netif_rx() for one interface
  *
- * One dmosi thread per interface currently registered with dmnetif at
- * startup, each running dmnetbridge_handle_netif_rx(iface) - the only
- * code path allowed to call dmnetif_receive() on a given interface once
- * this service owns it (see dmnetbridge.h's own doc comment).
+ * One instance per interface, not one service for all of them. dmnetif
+ * reports every interface it registers as a `netif` class device, a device
+ * rule (networkd.rules) maps that class to this module's unit template, and
+ * libsystemd instantiates `networkd@<interface>` for each one - the same
+ * shape dmtty and console@.ini use for tty nodes. The interface's name
+ * arrives as argv[1], from the template's `%i`.
  *
- * Restartable: dmnetbridge_reset() is called before spawning any pump
- * thread, so a previous instance's "which interfaces are being pumped"
- * bookkeeping in dmnetbridge can't make a fresh start think an interface
- * is already being pumped when nothing is actually reading it anymore
- * (see dmnetbridge_reset()'s own doc comment for why this exists instead
- * of a full dmod_preinit()-driven module restart).
+ * The pump runs on this process's own stack rather than on a thread spawned
+ * beside it. There is exactly one interface to pump and nothing for the
+ * process to do afterwards, so a supervisor thread would only sit in a sleep
+ * loop waiting to be killed - an extra stack per instance, bought for
+ * nothing. dmnetbridge_handle_netif_rx() blocks until its interface is gone,
+ * which is precisely this process's lifetime.
  *
- * Scope limit: only interfaces already registered with dmnetif when
- * main() runs get a pump thread - dmnetif has no "a new interface was
- * just registered" notification today (unlike dmdevfs's hotplug callback
- * mechanism for devices), so an interface registered after networkd has
- * started is not auto-discovered. Follow-up work, not solved here.
+ * It also removes the old shape's scope limit: interfaces were enumerated
+ * once at startup, so anything registered later never got a pump. Here a
+ * late interface is just another device notification, and gets its own
+ * instance like any other.
  */
 #include "dmod.h"
 #include "dmnetif.h"
 #include "dmnetbridge.h"
-#include "dmlist.h"
-#include "dmosi.h"
-
-/**
- * @brief How often main()'s loop wakes up to check g_stop_requested while
- *        idle - not a responsiveness-critical value, just short enough
- *        that dmod_signal() doesn't take long to be noticed
- */
-#define NETWORKD_MAIN_LOOP_SLEEP_MS 1000u
-
-/**
- * @brief Priority each interface's pump thread runs at
- *
- * Above the idle priority on purpose. A pump left at priority 0 shares it
- * with the idle task, so the semaphore post the RX ISR makes never sets
- * FreeRTOS's xHigherPriorityTaskWoken - waking the pump cannot preempt
- * anything, and it has to wait for its next round-robin slice instead of
- * running as soon as the frame is there. Raising it is what turns "a frame
- * arrived" into a scheduling event rather than a hint picked up at the next
- * tick.
- */
-#define NETWORKD_PUMP_THREAD_PRIORITY 0
-
-/**
- * @brief One interface's pump thread
- */
-typedef struct
-{
-    dmnetif_iface_t iface;
-    dmosi_thread_t  thread;
-} pump_t;
-
-/**
- * @brief Every pump_t spawned by main(), so dmod_signal() can join/stop
- *        them before returning
- */
-static dmlist_context_t* g_pumps = NULL;
-
-/**
- * @brief Set by dmod_signal(), checked by main()'s loop
- */
-static volatile bool g_stop_requested = false;
-
-/**
- * @brief Thread entry point for one interface's pump thread
- */
-static void pump_thread_entry(void* arg)
-{
-    dmnetbridge_handle_netif_rx((dmnetif_iface_t)arg);
-}
-
-/**
- * @brief dmnetif_iterator_func_t spawning one pump_t per registered interface
- */
-static bool spawn_pump(dmnetif_iface_t iface, void* user_data)
-{
-    (void)user_data;
-
-    pump_t* pump = Dmod_Malloc(sizeof(*pump));
-    if (pump == NULL)
-    {
-        DMOD_LOG_ERROR("networkd: cannot allocate pump state for '%s'\n", dmnetif_get_name(iface));
-        return true; /* keep enumerating the remaining interfaces */
-    }
-
-    pump->iface = iface;
-    pump->thread = dmosi_thread_create(pump_thread_entry, iface, NETWORKD_PUMP_THREAD_PRIORITY,
-                                       4096, dmnetif_get_name(iface), NULL);
-    if (pump->thread == NULL)
-    {
-        DMOD_LOG_ERROR("networkd: cannot start pump thread for '%s'\n", dmnetif_get_name(iface));
-        Dmod_Free(pump);
-        return true;
-    }
-
-    if (!dmlist_push_back(g_pumps, pump))
-    {
-        DMOD_LOG_ERROR("networkd: cannot track pump thread for '%s' - stopping it\n", dmnetif_get_name(iface));
-        dmosi_thread_kill(pump->thread, 0);
-        dmosi_thread_destroy(pump->thread);
-        Dmod_Free(pump);
-    }
-
-    return true;
-}
-
-/**
- * @brief Join every tracked pump thread, killing it first if it hasn't
- *        stopped on its own (its interface is still present)
- */
-static void stop_all_pumps(void)
-{
-    size_t count = dmlist_size(g_pumps);
-    for (size_t i = 0; i < count; i++)
-    {
-        pump_t* pump = (pump_t*)dmlist_pop_front(g_pumps);
-
-        if (dmnetif_is_present(pump->iface))
-        {
-            /* Still pumping - dmnetbridge_handle_netif_rx() only returns
-             * once dmnetif_is_present() goes false (see its own doc
-             * comment), which isn't the case here, so a cooperative join
-             * would block indefinitely. */
-            dmosi_thread_kill(pump->thread, 0);
-        }
-
-        dmosi_thread_join(pump->thread);
-        dmosi_thread_destroy(pump->thread);
-        Dmod_Free(pump);
-    }
-}
-
-/**
- * @brief Requests a graceful stop - see main()'s loop
- */
-int dmod_signal(int SignalNumber)
-{
-    (void)SignalNumber;
-    g_stop_requested = true;
-    return 0;
-}
+#include <errno.h>
 
 /**
  * @brief Main function of the application
  *
- * @return 0 on a clean stop (dmod_signal() called), negative errno if
- *         g_pumps itself could not be allocated
+ * @param argc Argument count
+ * @param argv argv[1] is the interface name to pump (the unit template's %i)
+ *
+ * @return 0 once the interface is gone, -EINVAL without an interface name,
+ *         -ENODEV if no interface by that name is registered
  */
 int main(int argc, char *argv[])
 {
-    (void)argc;
-    (void)argv;
-
-    g_pumps = dmlist_create(Dmod_GetCurrentAllocatorName());
-    if (g_pumps == NULL)
+    if (argc < 2 || argv[1] == NULL || argv[1][0] == '\0')
     {
-        DMOD_LOG_ERROR("networkd: cannot allocate pump registry\n");
-        return -1;
+        DMOD_LOG_ERROR("networkd: no interface name given\n");
+        Dmod_Printf("Usage: networkd <interface>\n");
+        Dmod_Printf("Started per interface from networkd@.ini - see networkd.rules\n");
+        return -EINVAL;
     }
 
-    dmnetbridge_reset();
-    dmnetif_for_each(spawn_pump, NULL);
+    const char* name = argv[1];
 
-    DMOD_LOG_INFO("networkd: pumping %u interface(s)\n", (unsigned)dmlist_size(g_pumps));
-
-    while (!g_stop_requested)
+    dmnetif_iface_t iface = dmnetif_find_by_name(name);
+    if (iface == NULL)
     {
-        dmosi_thread_sleep(NETWORKD_MAIN_LOOP_SLEEP_MS);
+        DMOD_LOG_ERROR("networkd: no interface named '%s' is registered\n", name);
+        return -ENODEV;
     }
 
-    stop_all_pumps();
-    dmlist_destroy(g_pumps);
-    g_pumps = NULL;
+    /* An instance that was killed rather than allowed to finish leaves its
+     * interface marked as being pumped, and this one would then find it taken
+     * and return immediately - so release it first. Per interface, never the
+     * global dmnetbridge_reset(): every other interface has its own instance
+     * and its own bookkeeping to keep. */
+    dmnetbridge_release_netif(iface);
 
-    DMOD_LOG_INFO("networkd: stopped\n");
+    DMOD_LOG_INFO("networkd: pumping '%s'\n", name);
+
+    /* Returns when the interface is gone - see dmnetbridge_handle_netif_rx() */
+    dmnetbridge_handle_netif_rx(iface);
+
+    DMOD_LOG_INFO("networkd: '%s' is gone, stopping\n", name);
     return 0;
 }

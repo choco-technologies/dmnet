@@ -1,0 +1,14 @@
+; networkd.rules - libsystemd device rule.
+;
+; Every interface dmnetif registers is reported under class "netif" (see
+; notify_added() in dmnetif's src/dmnetif.c). Each one gets its own
+; networkd@<name> instance, instantiated on demand from networkd@.ini.
+;
+; This is what replaced networkd enumerating interfaces itself: an interface
+; registered after boot is just another notification here, instead of one it
+; could never find out about.
+;
+; Load with libsystemd_load_rules() on the directory this file lives in -
+; see dmsystem's docs/configuration.md ("Device rules").
+[class=netif]
+start=networkd@%name
