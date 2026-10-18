@@ -4,3 +4,4 @@
 # it does.
 add_subdirectory(ifconfig)
 add_subdirectory(ip)
+add_subdirectory(wifi)

@@ -1,0 +1,39 @@
+# DMOD Resource File for wifi
+# This file specifies where resources should be installed
+#
+# wifi lives nested under dmnet/tools/wifi rather than being its own
+# top-level repo, so ${repo_dir}/${build_dir} below (which always resolve
+# to the dmnet repo/build root, not this subdirectory) are prefixed with
+# tools/wifi - same convention tools/ifconfig/ifconfig.dmr uses.
+
+# === Core Module ===
+# Main module file - always installed
+dmf=./${module}.dmf => ${destination}/${module}.dmf [origin=${dmf_dir}/${module}.dmf]
+
+# Compressed module
+dmfc=./${module}.dmfc => ${destination}/${module}.dmfc [origin=${build_dir}/dmfc/${module}.dmfc]
+
+# Dependencies file (if exists)
+dmd=./${module}.dmd => ${destination}/${module}.dmd [origin=${dmf_dir}/${module}.dmd]
+
+# Version information
+version=./${module}_version.txt => ${destination}/${module}_version.txt [origin=${dmf_dir}/${module}_version.txt]
+
+# === Documentation ===
+# Module documentation in markdown format for dmf-man tool
+docs=./docs => ${destination}/${module}/docs [origin=${repo_dir}/tools/wifi/docs]
+
+# README file
+readme=./README.md => ${destination}/${module}/README.md [origin=${repo_dir}/tools/wifi/README.md]
+
+# === Header Files ===
+# Only the generated module definitions header (its API is dmdrvi's
+# DMDRVI_IOCTL_WIFI_*) - see tools/ifconfig/ifconfig.dmr.
+inc=./include/${module}_defs.h => ${destination}/${module}/include/${module}_defs.h [origin=${build_dir}/tools/wifi/${module}_defs.h]
+
+# === License ===
+# License file - shared at the dmnet repo root
+license=./LICENSE => ${destination}/${module}/LICENSE [origin=${repo_dir}/LICENSE]
+
+# Adding itself
+dmr=./${module}.dmr => ${destination}/${module}/${module}.dmr [origin=${repo_dir}/tools/wifi/${module}.dmr]

@@ -45,6 +45,7 @@ dependency is. `lib/` itself is kept only as an (empty) subdirectory
 | `services/networkd/`   | Application module  | Spawns one thread per interface already known to `dmnetif` at startup, each running `dmnetbridge_handle_netif_rx()`. See [services/networkd/README.md](services/networkd/README.md). |
 | `tools/ifconfig/`      | Application module  | CLI to list/create/configure `dmnetif`-registered interfaces (`ifconfig <iface> up/down/mtu/...`). See [tools/ifconfig/README.md](tools/ifconfig/README.md). |
 | `tools/ip/`            | Application module  | CLI to list/add/remove routes in `dmroute`'s table (`ip route ...`). See [tools/ip/README.md](tools/ip/README.md). |
+| `tools/wifi/`          | Application module  | CLI for any Wi-Fi network device: scan, connect, status (`wifi connect SSID`), through dmdrvi's `DMDRVI_IOCTL_WIFI_*`. See [tools/wifi/README.md](tools/wifi/README.md). |
 | `tools/netctl/`        | (scaffold only)      | No module content yet - not added to `tools/CMakeLists.txt` (see its comment there).                              |
 | `lib/`                 | (empty)              | Historical location of `dmip`/`dmarp`/`dmnetbridge`/`dmnetif`/`dmroute`, now split into their own repos.           |
 
@@ -230,6 +231,7 @@ dmnet/
 ├── tools/
 │   ├── ifconfig/            # Interface CLI
 │   ├── ip/                  # Routing CLI
+│   ├── wifi/                # Wi-Fi CLI (scan, connect, status)
 │   └── netctl/              # Scaffold only, not yet built
 ├── CMakeLists.txt
 ├── Makefile
