@@ -3,7 +3,7 @@ $include https://github.com/choco-technologies/dmnet/releases/download/vlatest/v
 
 # Module entries with version placeholder - expanded by $version-available.
 # This repo defines several independent modules (the top-level dmnet
-# library, dmip/dmarp under lib/, the ifconfig/ip CLIs under tools/ and the
+# library, dmip/dmarp under lib/, the ifconfig/ip/wifi CLIs under tools/ and the
 # networkd service under services/, plus each one's test module) - the
 # release workflow packages all of them per full architecture (<arch_name>),
 # not per CPU family, since none of them are hardware ports (contrast with
@@ -20,5 +20,7 @@ ifconfig       https://github.com/choco-technologies/dmnet/releases/download/v<v
 test_ifconfig  https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_ifconfig-v<version>-<arch_name>.zip
 ip             https://github.com/choco-technologies/dmnet/releases/download/v<version>/ip-v<version>-<arch_name>.zip
 test_ip        https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_ip-v<version>-<arch_name>.zip
+wifi           https://github.com/choco-technologies/dmnet/releases/download/v<version>/wifi-v<version>-<arch_name>.zip
+test_wifi      https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_wifi-v<version>-<arch_name>.zip
 networkd       https://github.com/choco-technologies/dmnet/releases/download/v<version>/networkd-v<version>-<arch_name>.zip
 test_networkd  https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_networkd-v<version>-<arch_name>.zip
