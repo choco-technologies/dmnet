@@ -28,7 +28,8 @@
 #define CONNECT_WAIT_MS     20000u      /* How long a connection attempt is given */
 #define LOST_MS             30000u      /* Not connected for so long: take a network again */
 #define NO_NETWORK_MS       15000u      /* No saved network in range: look again after */
-#define NO_VAULT_MS         30000u      /* No vault (yet): the card may not be there yet */
+#define SCAN_RETRY_MS       3000u       /* The scan itself failed (the radio is busy or not ready): soon */
+#define NO_VAULT_MS         3000u       /* No vault (yet): the card is mounted some 25 s after the start */
 #define BUSY_MS             2000u       /* The vault is open elsewhere (wifi save): try again soon */
 #define NO_VAULT            (-ENXIO)    /* pick_network(): there is no vault */
 
@@ -86,6 +87,22 @@ static int pick_network(const dmdrvi_wifi_ap_t *aps, size_t ap_count, dmdrvi_wif
     return found ? 0 : -ENOENT;
 }
 
+/* Is there a vault to pick from? A cheap look (the header only, no key): 0, NO_VAULT, -EBUSY or an error.
+ * Asked before a scan, so that waiting for the card does not cost a scan every time. */
+static int vault_ready(void)
+{
+    dmsecrets_config_t config;
+    dmsecrets_t vault = NULL;
+
+    memset(&config, 0, sizeof(config));
+    config.domain = "wifi";
+    config.flags = DMSECRETS_OPEN_DEVICE_KEY | DMSECRETS_OPEN_READONLY;
+    int result = dmsecrets_open(&config, &vault);
+    if (result == 0)
+        dmsecrets_close(vault);
+    return result == -ENOENT ? NO_VAULT : result;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2)
@@ -107,6 +124,7 @@ int main(int argc, char **argv)
 
     int result;
     bool said_no_vault = false;
+    bool said_scan_failed = false;
     uint32_t lost_since = 0;
     bool said_no_network = false;
     for (;;)
@@ -143,12 +161,27 @@ int main(int argc, char **argv)
             continue;
         }
 
-        memset(&scan, 0, sizeof(scan));
-        scan.aps = aps;
-        scan.max = SCAN_MAX;
-        result = dmnetif_ioctl(iface, DMDRVI_IOCTL_WIFI_SCAN, &scan);
+        result = vault_ready();                 /* no scan before there is a vault to pick from */
         if (result == 0)
+        {
+            memset(&scan, 0, sizeof(scan));
+            scan.aps = aps;
+            scan.max = SCAN_MAX;
+            int scanned = dmnetif_ioctl(iface, DMDRVI_IOCTL_WIFI_SCAN, &scan);
+            if (scanned != 0)
+            {
+                /* Not "no network in range": the radio could not scan (not ready, busy). Soon again. */
+                char code[16];
+                Dmod_SnPrintf(code, sizeof(code), "(%d)", scanned);
+                if (!said_scan_failed)
+                    log_line(name, "the scan failed", code);
+                said_scan_failed = true;
+                dmosi_thread_sleep(SCAN_RETRY_MS);
+                continue;
+            }
+            said_scan_failed = false;
             result = pick_network(aps, scan.count, &network);
+        }
         if (result == -EACCES || result == -ENODEV)
         {
             log_line(name, "cannot unlock the vault - is the device key (/dev/devkey) there?", NULL);
