@@ -17,7 +17,9 @@
  * connection has been gone for a while.
  *
  * The vault is opened with the device key (DMSECRETS_OPEN_DEVICE_KEY): nobody types
- * anything. Its path is DMSECRETS_WIFI_PATH, else DMSECRETS_PATH.
+ * anything. Its path is DMSECRETS_WIFI_PATH, else DMSECRETS_PATH. It is open only while
+ * a network is being picked (a vault is open once per system: `wifi save` must be able to
+ * open it, and the passwords are not kept in memory between two picks).
  */
 
 #define SCAN_MAX            16
@@ -27,25 +29,37 @@
 #define LOST_MS             30000u      /* Not connected for so long: take a network again */
 #define NO_NETWORK_MS       15000u      /* No saved network in range: look again after */
 #define NO_VAULT_MS         30000u      /* No vault (yet): the card may not be there yet */
+#define BUSY_MS             2000u       /* The vault is open elsewhere (wifi save): try again soon */
+#define NO_VAULT            (-ENXIO)    /* pick_network(): there is no vault */
 
 static void log_line(const char *iface, const char *text, const char *detail)
 {
     Dmod_Printf("wifid %s: %s%s%s\n", iface, text, detail != NULL ? " " : "", detail != NULL ? detail : "");
 }
 
-/* Picks the saved network in range with the strongest signal: 0 and the credentials, or -ENOENT */
-static int pick_network(dmsecrets_t vault, const dmdrvi_wifi_ap_t *aps, size_t ap_count, dmdrvi_wifi_connect_t *out)
+/* Picks the saved network in range with the strongest signal: 0 and the credentials, -ENOENT when
+ * none is in range, NO_VAULT without a vault, -EBUSY when the vault is open elsewhere, -EACCES /
+ * -ENODEV when it cannot be unlocked (no device key). The vault is open only inside. */
+static int pick_network(const dmdrvi_wifi_ap_t *aps, size_t ap_count, dmdrvi_wifi_connect_t *out)
 {
+    dmsecrets_config_t config;
+    dmsecrets_t vault = NULL;
     size_t saved = 0;
     int best_rssi = -1000;
     bool found = false;
     char name[DMSECRETS_NAME_MAX + 1];
 
-    int result = dmsecrets_count(vault, VAULT_PREFIX, &saved);
+    memset(&config, 0, sizeof(config));
+    config.domain = "wifi";
+    config.flags = DMSECRETS_OPEN_DEVICE_KEY | DMSECRETS_OPEN_READONLY;
+    int result = dmsecrets_open(&config, &vault);
+    if (result == -ENOENT)
+        return NO_VAULT;
     if (result != 0)
         return result;
 
-    for (size_t i = 0; i < saved; i++)
+    result = dmsecrets_count(vault, VAULT_PREFIX, &saved);       /* unlocks it */
+    for (size_t i = 0; result == 0 && i < saved; i++)
     {
         if (dmsecrets_name_at(vault, VAULT_PREFIX, i, name, sizeof(name)) != 0)
             continue;
@@ -66,6 +80,9 @@ static int pick_network(dmsecrets_t vault, const dmdrvi_wifi_ap_t *aps, size_t a
             }
         }
     }
+    dmsecrets_close(vault);                                      /* wipes its key and records */
+    if (result != 0)
+        return result;
     return found ? 0 : -ENOENT;
 }
 
@@ -88,27 +105,8 @@ int main(int argc, char **argv)
     if (dmnetif_ioctl(iface, DMDRVI_IOCTL_WIFI_GET_STATUS, &status) != 0)
         return 0;                               /* Not a Wi-Fi interface: nothing to do */
 
-    dmsecrets_config_t config;
-    dmsecrets_t vault = NULL;
-    memset(&config, 0, sizeof(config));
-    config.domain = "wifi";
-    config.flags = DMSECRETS_OPEN_DEVICE_KEY | DMSECRETS_OPEN_READONLY;
-
     int result;
     bool said_no_vault = false;
-    while ((result = dmsecrets_open(&config, &vault)) == -ENOENT)
-    {
-        if (!said_no_vault)
-            log_line(name, "no vault of saved networks (DMSECRETS_WIFI_PATH / DMSECRETS_PATH, `wifi save`) - waiting", NULL);
-        said_no_vault = true;
-        dmosi_thread_sleep(NO_VAULT_MS);
-    }
-    if (result != 0)
-    {
-        log_line(name, "cannot open the vault", result == -EBADMSG ? "(not a vault)" : NULL);
-        return result;
-    }
-
     uint32_t lost_since = 0;
     bool said_no_network = false;
     for (;;)
@@ -150,11 +148,25 @@ int main(int argc, char **argv)
         scan.max = SCAN_MAX;
         result = dmnetif_ioctl(iface, DMDRVI_IOCTL_WIFI_SCAN, &scan);
         if (result == 0)
-            result = pick_network(vault, aps, scan.count, &network);
+            result = pick_network(aps, scan.count, &network);
         if (result == -EACCES || result == -ENODEV)
         {
             log_line(name, "cannot unlock the vault - is the device key (/dev/devkey) there?", NULL);
             break;
+        }
+        if (result == NO_VAULT)
+        {
+            if (!said_no_vault)
+                log_line(name, "no vault of saved networks (DMSECRETS_WIFI_PATH / DMSECRETS_PATH, `wifi save`) - waiting", NULL);
+            said_no_vault = true;
+            dmosi_thread_sleep(NO_VAULT_MS);
+            continue;
+        }
+        said_no_vault = false;
+        if (result == -EBUSY)
+        {
+            dmosi_thread_sleep(BUSY_MS);            /* `wifi save` has it open */
+            continue;
         }
         if (result != 0)
         {
@@ -191,6 +203,5 @@ int main(int argc, char **argv)
             lost_since = 1;
     }
 
-    dmsecrets_close(vault);
     return -1;
 }

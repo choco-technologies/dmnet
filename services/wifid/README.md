@@ -12,11 +12,13 @@ wifi save "Home Network" mypassword      # once (or: wifi connect "Home Network"
 (`configs/wifid.rules`, as for networkd and dhcp) and ends at once on one that is not a
 Wi-Fi interface (it asks for `DMDRVI_IOCTL_WIFI_GET_STATUS`). On a Wi-Fi one it stays:
 
-1. opens the vault of the saved networks (records `wifi/<SSID>` = the password) with the
-   **device key** (`DMSECRETS_OPEN_DEVICE_KEY`: a key derived from `/dev/devkey`, which
+1. when it needs a network, opens the vault of the saved networks (records `wifi/<SSID>` =
+   the password) with the **device key** (`DMSECRETS_OPEN_DEVICE_KEY`: a key derived from `/dev/devkey`, which
    dmod-boot serves from the secret it was built with) - nobody is asked for a passphrase;
 2. when the interface is not connected, scans, takes the saved network **in range with the
-   strongest signal** and connects to it (`DMDRVI_IOCTL_WIFI_CONNECT`);
+   strongest signal**, **closes the vault again** (a vault is open once per system, so `wifi save`
+   works while wifid runs, and the passwords are not kept in memory) and connects to it
+   (`DMDRVI_IOCTL_WIFI_CONNECT`);
 3. watches the connection; when it has been gone for 30 s it looks again - so the board moves
    from one saved network to another by itself.
 
