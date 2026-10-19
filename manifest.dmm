@@ -22,5 +22,7 @@ ip             https://github.com/choco-technologies/dmnet/releases/download/v<v
 test_ip        https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_ip-v<version>-<arch_name>.zip
 wifi           https://github.com/choco-technologies/dmnet/releases/download/v<version>/wifi-v<version>-<arch_name>.zip
 test_wifi      https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_wifi-v<version>-<arch_name>.zip
+wifid          https://github.com/choco-technologies/dmnet/releases/download/v<version>/wifid-v<version>-<arch_name>.zip
+test_wifid     https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_wifid-v<version>-<arch_name>.zip
 networkd       https://github.com/choco-technologies/dmnet/releases/download/v<version>/networkd-v<version>-<arch_name>.zip
 test_networkd  https://github.com/choco-technologies/dmnet/releases/download/v<version>/test_networkd-v<version>-<arch_name>.zip

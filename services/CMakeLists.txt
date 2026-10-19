@@ -6,3 +6,4 @@
 # transitively through it, dmnetif/dmroute/dmarp), all added earlier via
 # the top-level add_subdirectory(lib) - see dmnet/CMakeLists.txt.
 add_subdirectory(networkd)
+add_subdirectory(wifid)

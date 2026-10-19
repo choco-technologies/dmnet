@@ -22,6 +22,7 @@ dmod_add_executable(${DMOD_MODULE_NAME} ${DMOD_MODULE_VERSION}
 # dmosi:  sleep while waiting for a connection.
 dmod_link_modules(${DMOD_MODULE_NAME}
     dmdrvi@>=2.9
+    dmsecrets
     dmosi
 )
 
