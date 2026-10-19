@@ -1,0 +1,6 @@
+; wifid.rules - libsystemd device rule: every interface dmnetif registers
+; (class "netif") gets a wifid@<name>, which does nothing for an interface that
+; is not a Wi-Fi one. Like networkd.rules and dhcp.rules; load with
+; libsystemd_load_rules() on the directory this file lives in.
+[class=netif]
+start=wifid@%name

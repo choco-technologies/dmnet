@@ -46,6 +46,7 @@ dependency is. `lib/` itself is kept only as an (empty) subdirectory
 | `tools/ifconfig/`      | Application module  | CLI to list/create/configure `dmnetif`-registered interfaces (`ifconfig <iface> up/down/mtu/...`). See [tools/ifconfig/README.md](tools/ifconfig/README.md). |
 | `tools/ip/`            | Application module  | CLI to list/add/remove routes in `dmroute`'s table (`ip route ...`). See [tools/ip/README.md](tools/ip/README.md). |
 | `tools/wifi/`          | Application module  | CLI for any Wi-Fi network device: scan, connect, status (`wifi connect SSID`), through dmdrvi's `DMDRVI_IOCTL_WIFI_*`. See [tools/wifi/README.md](tools/wifi/README.md). |
+| `services/wifid/`      | Application module  | Keeps a Wi-Fi interface connected to a network saved in the "wifi" vault of dmsecrets (strongest in range), by itself. See [services/wifid/README.md](services/wifid/README.md). |
 | `tools/netctl/`        | (scaffold only)      | No module content yet - not added to `tools/CMakeLists.txt` (see its comment there).                              |
 | `lib/`                 | (empty)              | Historical location of `dmip`/`dmarp`/`dmnetbridge`/`dmnetif`/`dmroute`, now split into their own repos.           |
 

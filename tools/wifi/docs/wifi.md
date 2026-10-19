@@ -19,6 +19,8 @@ wifi [-d DEVICE] COMMAND [ARGS]
   connect SSID [PASSWORD]  connect (and again whenever lost), wait for it;
                            without PASSWORD it asks (not echoed; Enter: none)
   disconnect               disconnect and forget the network
+  connect SSID [PASSWORD] -s   ... and save the network (see README: Saved networks)
+  save SSID [PASSWORD] | saved | forget SSID   the saved networks
 ```
 
 `DEVICE` defaults to `/dev/wlan0`.

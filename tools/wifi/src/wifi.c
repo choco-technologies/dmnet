@@ -1,6 +1,8 @@
 #include "dmod.h"
 #include "dmosi.h"
 #include "dmdrvi_ioctl.h"
+#include "dmsecrets.h"
+#include <errno.h>
 #include <string.h>
 
 /**
@@ -26,6 +28,10 @@ static void print_usage(const char *name)
     Dmod_Printf("  connect SSID [PASSWORD]  connect (and again whenever lost), wait for it\n");
     Dmod_Printf("                           without PASSWORD it asks for one (not echoed)\n");
     Dmod_Printf("  disconnect               disconnect and forget the network\n");
+    Dmod_Printf("  connect SSID [PASSWORD] -s   ... and save the network, so that wifid connects by itself\n");
+    Dmod_Printf("  save SSID [PASSWORD]     save a network (in the \"wifi\" vault of dmsecrets)\n");
+    Dmod_Printf("  saved                    the saved networks\n");
+    Dmod_Printf("  forget SSID              remove a saved network\n");
     Dmod_Printf("DEVICE defaults to %s\n", DEFAULT_DEVICE);
 }
 
@@ -126,13 +132,13 @@ static int do_scan(void *dev)
     return 0;
 }
 
-/* Reads a password from the terminal without echoing it; false when it
+/* Reads a line from the terminal without echoing it; false when it
  * cannot be read */
-static bool ask_password(char *out, size_t size)
+static bool ask_line(const char *prompt, char *out, size_t size)
 {
     uint32_t flags = Dmod_Stdin_GetFlags();
 
-    Dmod_Printf("Password (Enter: none): ");
+    Dmod_Printf("%s", prompt);
     (void)Dmod_Stdin_SetFlags((flags & ~(uint32_t)DMOD_STDIN_FLAG_ECHO) | DMOD_STDIN_FLAG_CANONICAL);
     /* Dmod_Gets leaves "text\n" and does not terminate it: zeroed first, cut
      * at the end of the line */
@@ -153,7 +159,130 @@ static bool ask_password(char *out, size_t size)
     return true;
 }
 
-static int do_connect(void *dev, const char *ssid, const char *password)
+static bool ask_password(char *out, size_t size)
+{
+    return ask_line("Password (Enter: none): ", out, size);
+}
+
+/* ---- The vault of saved networks: records "wifi/<SSID>" = the password ----
+ * Opened with the device key (what wifid uses); where the system has none, the
+ * passphrase is asked for - but then wifid cannot open the vault. */
+
+#define VAULT_PREFIX    "wifi/"
+
+static int vault_passphrase(void *context, bool creating, void *passphrase, size_t size, size_t *length)
+{
+    char first[100], again[100];
+
+    (void)context;
+    if (size > sizeof(first) - 1)
+        size = sizeof(first) - 1;
+    if (!ask_line(creating ? "New vault of networks - passphrase: " : "Vault passphrase: ", first, sizeof(first)))
+        return -ECANCELED;
+    if (creating)
+    {
+        if (!ask_line("Again: ", again, sizeof(again)) || strcmp(first, again) != 0)
+        {
+            memset(first, 0, sizeof(first));
+            memset(again, 0, sizeof(again));
+            return -EINVAL;
+        }
+        memset(again, 0, sizeof(again));
+    }
+    *length = strlen(first);
+    if (*length == 0 || *length > size)
+    {
+        memset(first, 0, sizeof(first));
+        return -EINVAL;
+    }
+    memcpy(passphrase, first, *length);
+    memset(first, 0, sizeof(first));
+    return 0;
+}
+
+static dmsecrets_t open_vault(bool create)
+{
+    dmsecrets_config_t config;
+    dmsecrets_t vault = NULL;
+
+    memset(&config, 0, sizeof(config));
+    config.domain = "wifi";
+    config.flags = DMSECRETS_OPEN_DEVICE_KEY | (create ? DMSECRETS_OPEN_CREATE : 0);
+    config.passphrase_provider = vault_passphrase;
+    int ret = dmsecrets_open(&config, &vault);
+    if (ret != 0)
+    {
+        Dmod_Printf("wifi: cannot open the vault (%d): %s\n", ret,
+                    ret == -ENOENT ? "no path (DMSECRETS_WIFI_PATH / DMSECRETS_PATH) or no such vault (wifi save makes it)"
+                                   : "not a vault, or busy");
+        return NULL;
+    }
+    return vault;
+}
+
+static int save_network(const char *ssid, const char *password)
+{
+    char name[DMSECRETS_NAME_MAX + 1];
+
+    if (strlen(ssid) == 0 || strlen(ssid) > DMDRVI_WIFI_SSID_MAX)
+    {
+        Dmod_Printf("wifi: SSID at most %d characters\n", DMDRVI_WIFI_SSID_MAX);
+        return -1;
+    }
+    dmsecrets_t vault = open_vault(true);
+    if (vault == NULL)
+        return -1;
+    strcpy(name, VAULT_PREFIX);
+    strcat(name, ssid);
+    int ret = dmsecrets_set(vault, name, password, strlen(password));
+    dmsecrets_close(vault);
+    if (ret != 0)
+        Dmod_Printf("wifi: not saved (%d)%s\n", ret, ret == -ENODEV ? " - no entropy source for dmcrypto" : "");
+    else
+        Dmod_Printf("saved %s\n", ssid);
+    return ret;
+}
+
+static int list_saved(void)
+{
+    char name[DMSECRETS_NAME_MAX + 1];
+    size_t count = 0;
+
+    dmsecrets_t vault = open_vault(false);
+    if (vault == NULL)
+        return -1;
+    int ret = dmsecrets_count(vault, VAULT_PREFIX, &count);
+    for (size_t n = 0; ret == 0 && n < count; n++)
+    {
+        ret = dmsecrets_name_at(vault, VAULT_PREFIX, n, name, sizeof(name));
+        if (ret == 0)
+            Dmod_Printf("%s\n", name + sizeof(VAULT_PREFIX) - 1);
+    }
+    if (ret == 0 && count == 0)
+        Dmod_Printf("(none)\n");
+    dmsecrets_close(vault);
+    return ret;
+}
+
+static int forget_network(const char *ssid)
+{
+    char name[DMSECRETS_NAME_MAX + 1];
+
+    if (strlen(ssid) == 0 || strlen(ssid) > DMDRVI_WIFI_SSID_MAX)
+        return -1;
+    dmsecrets_t vault = open_vault(false);
+    if (vault == NULL)
+        return -1;
+    strcpy(name, VAULT_PREFIX);
+    strcat(name, ssid);
+    int ret = dmsecrets_delete(vault, name);
+    dmsecrets_close(vault);
+    if (ret == 0)
+        Dmod_Printf("forgot %s\n", ssid);
+    return ret;
+}
+
+static int do_connect(void *dev, const char *ssid, const char *password, bool save)
 {
     dmdrvi_wifi_connect_t network;
     char typed[DMDRVI_WIFI_PASSWORD_MAX + 2];
@@ -183,10 +312,17 @@ static int do_connect(void *dev, const char *ssid, const char *password)
     {
         dmdrvi_wifi_status_t st;
         if (Dmod_Ioctl(dev, DMDRVI_IOCTL_WIFI_GET_STATUS, &st) == 0 && st.state == DMDRVI_WIFI_STATE_CONNECTED)
-            return show_status(dev);
+        {
+            int shown = show_status(dev);
+            if (save)
+                (void)save_network(ssid, network.password);     /* only a network that worked is saved */
+            memset(&network, 0, sizeof(network));
+            return shown;
+        }
         dmosi_thread_sleep(WAIT_STEP_MS);
     }
-    Dmod_Printf("not connected yet - it keeps trying (wifi status)\n");
+    memset(&network, 0, sizeof(network));
+    Dmod_Printf("not connected yet - it keeps trying (wifi status)%s\n", save ? "; not saved" : "");
     return show_status(dev);
 }
 
@@ -201,10 +337,42 @@ int main(int argc, char **argv)
         i += 2;
     }
     const char *command = (i < argc) ? argv[i] : "status";
+    bool save = false;
+    for (int a = i + 1; a < argc; a++)          /* "-s" after the command: save the network */
+    {
+        if (strcmp(argv[a], "-s") == 0)
+        {
+            save = true;
+            for (int b = a; b + 1 < argc; b++)
+                argv[b] = argv[b + 1];
+            argc--;
+            break;
+        }
+    }
     if (strcmp(command, "-h") == 0 || strcmp(command, "--help") == 0 || strcmp(command, "help") == 0)
     {
         print_usage(argv[0]);
         return 0;
+    }
+
+    /* The vault of saved networks needs no device */
+    if (strcmp(command, "saved") == 0)
+        return list_saved();
+    if (strcmp(command, "forget") == 0 && i + 1 < argc)
+        return forget_network(argv[i + 1]);
+    if (strcmp(command, "save") == 0 && i + 1 < argc)
+    {
+        char typed[DMDRVI_WIFI_PASSWORD_MAX + 2];
+        const char *password = (i + 2 < argc) ? argv[i + 2] : NULL;
+        if (password == NULL)
+        {
+            if (!ask_password(typed, sizeof(typed)))
+                return -1;
+            password = typed;
+        }
+        int saved = (strlen(password) <= DMDRVI_WIFI_PASSWORD_MAX) ? save_network(argv[i + 1], password) : -1;
+        memset(typed, 0, sizeof(typed));
+        return saved;
     }
 
     void *dev = Dmod_FileOpen(device, "r+");
@@ -222,7 +390,7 @@ int main(int argc, char **argv)
     else if (strcmp(command, "scan") == 0)
         ret = do_scan(dev);
     else if (strcmp(command, "connect") == 0 && i + 1 < argc)
-        ret = do_connect(dev, argv[i + 1], (i + 2 < argc) ? argv[i + 2] : NULL);
+        ret = do_connect(dev, argv[i + 1], (i + 2 < argc) ? argv[i + 2] : NULL, save);
     else if (strcmp(command, "disconnect") == 0)
         ret = Dmod_Ioctl(dev, DMDRVI_IOCTL_WIFI_DISCONNECT, NULL);
     else
