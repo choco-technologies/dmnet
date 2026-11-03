@@ -28,6 +28,11 @@ stack per interface, bought for nothing. It also means an interface that
 appears after boot gets a pump like any other, rather than being missed
 because enumeration already happened.
 
+The receive pump runs at priority 1. It normally blocks waiting for frames,
+but must get CPU time alongside foreground work when packets arrive.
+Running it at background priority 0 lets UI/image work delay TCP processing
+until retransmission limits expire, even though the link is healthy.
+
 ## Building
 
 ### Using CMake
